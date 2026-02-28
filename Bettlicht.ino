@@ -17,7 +17,7 @@ const char* ota_pass = OTA_PASS;
 CRGB leds[RGB_COUNT];
 
 // Hier stellst du gleich deinen gemessenen Wert ein:
-int touchThreshold = 40000; 
+int touchThreshold = 28000; 
 
 unsigned long lastPrintTime = 0;
 
@@ -45,7 +45,7 @@ const unsigned long LONG_PRESS_TIME = 600;
 bool longPressHandled = false;
 
 unsigned long lastReleaseTime = 0;
-const unsigned long TOUCH_COOLDOWN = 100; 
+const unsigned long TOUCH_COOLDOWN = 150; 
 
 // ===== Timer Variables =====
 unsigned long cycle_counter = 0;
@@ -57,6 +57,7 @@ void setup() {
 
   // --- WLAN & OTA ---
   WiFi.mode(WIFI_STA);
+  WiFi.setAutoReconnect(true);
   WiFi.begin(ssid, password);
   
   ArduinoOTA.setHostname("Bettlampe"); 
@@ -126,8 +127,15 @@ void setup() {
 }
 
 void loop() {
+  static unsigned long lastWiFiCheck = 0;
   if (WiFi.status() == WL_CONNECTED) {
     ArduinoOTA.handle(); 
+  } else {
+    if (millis() - lastWiFiCheck >= 10000) {
+      WiFi.disconnect(); 
+      WiFi.reconnect();
+      lastWiFiCheck = millis();
+    }
   }
 
   // Touch Sensor nativ auslesen
