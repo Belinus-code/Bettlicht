@@ -1,31 +1,38 @@
+#include <WiFi.h>
+#include <ArduinoOTA.h>
+#include "secrets.h"
 #include <Arduino.h>
-#include <CapacitiveSensor.h>
-#include <FastLED.h>
-#include <EEPROM.h> // <-- NEU: Für den permanenten Speicher
+#include <Preferences.h>
 #include "animations.h"
+#include <FastLED.h>
 
-// ===== Hardware Setup =====
-#define LED_PIN 9
+
+const char* ssid = WIFI_SSID;
+const char* password = WIFI_PASS;
+const char* ota_pass = OTA_PASS;
+
+#define LED_PIN D9
+#define TOUCH_PIN D2
 
 CRGB leds[RGB_COUNT];
 
-// Touch Sensor Setup (1 Megohm zwischen Pin 4 und 2, Folie an Pin 2)
-CapacitiveSensor touchSensor = CapacitiveSensor(4, 2);
-long touchThreshold = 150; 
+// Hier stellst du gleich deinen gemessenen Wert ein:
+int touchThreshold = 28000; 
 
-// ===== Animations Setup =====
-AnimationManager animationManager(leds, RGB_COUNT);
+unsigned long lastPrintTime = 0;
+
+Preferences preferences;
+AnimationManager animationManager(leds, RGB_COUNT, preferences);
 IAnimation* active_animation = nullptr;
 
-// Neue Liste mit Abstufungen von Weiß zu Orange
 const int NUM_ANIMATIONS = 8;
 String animationList[NUM_ANIMATIONS] = {
   "OFF", 
-  "WARM_1", // Neutrales Weiß zum Lesen
-  "WARM_2", // Angenehmes Warmweiß
-  "WARM_3", // Klassische Glühbirne
-  "WARM_4", // Bernstein / Kerzenschein
-  "WARM_5", // Tiefes, weiches Orange
+  "WARM_1", 
+  "WARM_2", 
+  "WARM_3", 
+  "WARM_4", 
+  "WARM_5", 
   "NIGHT_BLUE", 
   "RAINBOW"
 };
@@ -34,90 +41,84 @@ int currentAnimIndex = 0;
 // ===== Touch Logic Variables =====
 bool isTouched = false;
 unsigned long touchStartTime = 0;
-const unsigned long LONG_PRESS_TIME = 800; // 800 Millisekunden für einen langen Druck
+const unsigned long LONG_PRESS_TIME = 600; 
 bool longPressHandled = false;
 
-// Cooldown / Entprellen
 unsigned long lastReleaseTime = 0;
-const unsigned long TOUCH_COOLDOWN = 200; // 200ms Sperrzeit nach dem Loslassen
+const unsigned long TOUCH_COOLDOWN = 150; 
 
 // ===== Timer Variables =====
 unsigned long cycle_counter = 0;
 unsigned long lastUpdate = 0;
-const unsigned long UPDATE_INTERVAL = 50; // Animationen alle 50ms updaten
+const unsigned long UPDATE_INTERVAL = 50;
 
 void setup() {
   Serial.begin(115200);
+
+  // --- WLAN & OTA ---
+  WiFi.mode(WIFI_STA);
+  WiFi.setAutoReconnect(true);
+  WiFi.begin(ssid, password);
+  
+  ArduinoOTA.setHostname("Bettlampe"); 
+  ArduinoOTA.setPassword(ota_pass);
+  ArduinoOTA.begin();
+  
+  preferences.begin("lampe", false); 
+  // ---------------------------
+
   FastLED.addLeds<WS2812B, LED_PIN, GRB>(leds, RGB_COUNT).setCorrection(TypicalLEDStrip);
-  FastLED.setMaxPowerInVoltsAndMilliamps(5, 2400);
+  FastLED.setMaxPowerInVoltsAndMilliamps(5, 2600);
 
   animationManager.begin();
 
-  // 0. OFF
   if (animationManager.getAnimationIndex("OFF") == -1) {
     AnimationSetting* newSettings = animationManager.createSettingsStaticColor(0, 0, "OFF");
     animationManager.createAnimation(newSettings);
     delete newSettings;
   }
-  
-  // 1. WARM_1 (Heller! Helligkeit jetzt auf 255)
   if (animationManager.getAnimationIndex("WARM_1") == -1) {
     AnimationSetting* newSettings = animationManager.createSettingsStaticColor(0xFFE4CE, 255, "WARM_1");
     animationManager.createAnimation(newSettings);
     delete newSettings;
   }
-
-  // 2. WARM_2 (Helligkeit jetzt auf 200)
   if (animationManager.getAnimationIndex("WARM_2") == -1) {
     AnimationSetting* newSettings = animationManager.createSettingsStaticColor(0xFFCC88, 200, "WARM_2");
     animationManager.createAnimation(newSettings);
     delete newSettings;
   }
-
-  // 3. WARM_3 (Helligkeit jetzt auf 150)
   if (animationManager.getAnimationIndex("WARM_3") == -1) {
     AnimationSetting* newSettings = animationManager.createSettingsStaticColor(0xFFB060, 150, "WARM_3");
     animationManager.createAnimation(newSettings);
     delete newSettings;
   }
-
-  // 4. WARM_4 (Bernstein / Kerzenschein)
   if (animationManager.getAnimationIndex("WARM_4") == -1) {
     AnimationSetting* newSettings = animationManager.createSettingsStaticColor(0xFF8020, 110, "WARM_4");
     animationManager.createAnimation(newSettings);
     delete newSettings;
   }
-
-  // 5. WARM_5 (Tiefes, dunkles Orange)
   if (animationManager.getAnimationIndex("WARM_5") == -1) {
     AnimationSetting* newSettings = animationManager.createSettingsStaticColor(0xFF4500, 100, "WARM_5");
     animationManager.createAnimation(newSettings);
     delete newSettings;
   }
-
-  // 6. NIGHT_BLUE 
   if (animationManager.getAnimationIndex("NIGHT_BLUE") == -1) {
     AnimationSetting* newSettings = animationManager.createSettingsStaticColor(0x0000AA, 120, "NIGHT_BLUE");
     animationManager.createAnimation(newSettings);
     delete newSettings;
   }
-
-  // 7. RAINBOW 
   if (animationManager.getAnimationIndex("RAINBOW") == -1) {
     AnimationSetting* newSettings = animationManager.createSettingsPalette(0, 1, 2, 150, "RAINBOW");
     animationManager.createAnimation(newSettings);
     delete newSettings;
   }
 
-  // ===== Letzten Zustand aus dem EEPROM laden =====
-  currentAnimIndex = EEPROM.read(0); // Lese Adresse 0
+  currentAnimIndex = preferences.getInt("animIndex", 0); 
   
-  // Sicherheitscheck: Wenn das EEPROM ganz frisch ist, steht da oft 255 drin.
   if (currentAnimIndex >= NUM_ANIMATIONS || currentAnimIndex < 0) {
-    currentAnimIndex = 0; // Dann gehen wir sicherheitshalber auf OFF
+    currentAnimIndex = 0; 
   }
 
-  // Startzustand aus dem geladenen Index setzen
   String startAnim = animationList[currentAnimIndex];
   active_animation = animationManager.getAnimationByName(startAnim);
   if (active_animation != nullptr) {
@@ -126,7 +127,21 @@ void setup() {
 }
 
 void loop() {
-  long sensorValue = touchSensor.capacitiveSensor(30);
+  static unsigned long lastWiFiCheck = 0;
+  if (WiFi.status() == WL_CONNECTED) {
+    ArduinoOTA.handle(); 
+  } else {
+    if (millis() - lastWiFiCheck >= 10000) {
+      WiFi.disconnect(); 
+      WiFi.reconnect();
+      lastWiFiCheck = millis();
+    }
+  }
+
+  // Touch Sensor nativ auslesen
+  long sensorValue = touchRead(TOUCH_PIN);
+  
+  // WICHTIG: Je nach ESP-Framework muss hier < oder > stehen. 
   bool currentlyTouching = (sensorValue > touchThreshold);
 
   if (currentlyTouching && !isTouched && (millis() - lastReleaseTime >= TOUCH_COOLDOWN)) {
@@ -138,8 +153,8 @@ void loop() {
     if (!longPressHandled && (millis() - touchStartTime >= LONG_PRESS_TIME)) {
       Serial.println("Langer Druck -> OFF");
       
-      currentAnimIndex = 0; // Zurück auf OFF
-      EEPROM.update(0, currentAnimIndex); // <-- NEU: Zustand speichern!
+      currentAnimIndex = 0; 
+      preferences.putInt("animIndex", currentAnimIndex); // <-- NEU: Zustand speichern!
       
       active_animation = animationManager.getAnimationByName("OFF"); 
       if (active_animation != nullptr) {
@@ -158,7 +173,7 @@ void loop() {
         currentAnimIndex = 0;
       }
       
-      EEPROM.update(0, currentAnimIndex); // <-- NEU: Zustand speichern!
+      preferences.putInt("animIndex", currentAnimIndex); // <-- NEU: Zustand speichern!
       
       String nextAnim = animationList[currentAnimIndex];
       Serial.println("Kurzer Druck -> Wechsle zu: " + nextAnim);
