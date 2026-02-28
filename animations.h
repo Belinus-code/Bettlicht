@@ -1,5 +1,4 @@
 #pragma once
-// #include <Preferences.h> // <-- AUSKOMMENTIERT
 #include <FastLED.h>
 #define RGB_COUNT 89
 #define STATIC_COLOR 1
@@ -126,9 +125,9 @@ class StaticColorAnimation: public IAnimation
         void applyAnimationSetting(AnimationSetting* settings)
         {
             id = settings->id;
-            char tempName[14] = {0}; // Füllt das Array komplett mit Null-Terminatoren
-            strncpy(tempName, settings->name, 13); // Kopiert maximal 13 Zeichen
-            name = String(tempName); // Erstellt den String sicher
+            char tempName[14] = {0};
+            strncpy(tempName, settings->name, 13);
+            name = String(tempName);
             brightness = settings->data[0];
             color = 0;
             color |= settings->data[1];
@@ -262,9 +261,9 @@ class BlinkAnimation: public IAnimation
         void applyAnimationSetting(AnimationSetting* settings)
         {
             id = settings->id;
-            char tempName[14] = {0}; // Füllt das Array komplett mit Null-Terminatoren
-            strncpy(tempName, settings->name, 13); // Kopiert maximal 13 Zeichen
-            name = String(tempName); // Erstellt den String sicher
+            char tempName[14] = {0};
+            strncpy(tempName, settings->name, 13);
+            name = String(tempName);
             brightness = settings->data[0];
             cycle_ticks = settings->data[7];
             color_on = 0;
@@ -303,8 +302,8 @@ public:
     {
         brightness = 255;
         speed = 10;
-        delta = 3;         // Wie "breit" die Farben gestreckt sind
-        paletteID = 0;     // 0 = Rainbow
+        delta = 3;
+        paletteID = 0;
         update_needed = true;
     }
 
@@ -316,10 +315,9 @@ public:
 
     bool Update(unsigned long tick) override
     {
-        uint8_t colorIndex = (uint8_t)((tick * speed) >> 2);
+        uint8_t startIndex = (uint8_t)((tick * speed) >> 2);
         
-        CRGB color = ColorFromPalette(currentPalette, colorIndex, 255, LINEARBLEND);
-        fill_solid(leds, rgb_count, color);
+        fill_palette(leds, rgb_count, startIndex, delta, currentPalette, 255, LINEARBLEND);
 
         if(FastLED.getBrightness() != brightness) {
             FastLED.setBrightness(brightness);
@@ -413,9 +411,9 @@ public:
     void applyAnimationSetting(AnimationSetting* settings) override
     {
         id = settings->id;
-        char tempName[14] = {0}; // Füllt das Array komplett mit Null-Terminatoren
-        strncpy(tempName, settings->name, 13); // Kopiert maximal 13 Zeichen
-        name = String(tempName); // Erstellt den String sicher
+        char tempName[14] = {0};
+        strncpy(tempName, settings->name, 13);
+        name = String(tempName);
         brightness = settings->data[0];
         uint8_t newPalID = settings->data[1];
         speed = settings->data[2];
@@ -444,8 +442,7 @@ private:
 class AnimationManager
 {
     public: 
-        // Konstruktor angepasst: Preferences Parameter entfernt
-        AnimationManager(struct CRGB *targetArray_, int RGBCount_)
+        AnimationManager(struct CRGB *targetArray_, int RGBCount_, Preferences& storage)
         {
             leds = targetArray_;
             rgb_count = RGBCount_;
@@ -454,7 +451,7 @@ class AnimationManager
         void begin()
         {
             memset(animations, 0, sizeof(animations));
-            animation_count = 0; // Kein Laden aus dem Speicher mehr
+            animation_count = createAnimationsFromStorage();
         }
 
         ~AnimationManager(){};
@@ -509,7 +506,7 @@ class AnimationManager
             settings->id = i;
             animation->applyAnimationSetting(settings);
             
-            // if(save)saveAnimation(settings); // <-- AUSKOMMENTIERT
+            if(save)saveAnimation(settings);
             
             animations[i]=animation;
             animation_count++;
@@ -518,27 +515,35 @@ class AnimationManager
 
         int createAnimation(AnimationSetting* settings)
         {
-            return createAnimation(settings, false); // Return hinzugefügt
+            return createAnimation(settings, false);
         }
 
-        /* --- SPEICHERFUNKTIONEN AUSKOMMENTIERT ---
         void saveAnimation(AnimationSetting* settings)
-        { ... }
+        {
+            _storage.begin("anim_data");
+            String key = "a"+ String(settings->id);
+            _storage.putBytes(key.c_str(),settings,sizeof(AnimationSetting));
+            _storage.end();
+        }
 
         bool saveAnimationIndex(int id)
-        { ... }
-        */
+        {
+            if(id < 0 || id >= 100)return false;
+            if (animations[id] == nullptr) return false;
+            AnimationSetting settings;
+            animations[id]->getAnimationSetting(&settings);
+            saveAnimation(&settings);
+            return true;
+        }
 
         void deleteAnimation(int id)
         {
             if(id < 0 || id >= 100)return;
             
-            /* --- SPEICHER-LÖSCHEN AUSKOMMENTIERT ---
             String key = "a" + String(id);
             _storage.begin("anim_data", false);
             _storage.remove(key.c_str()); 
             _storage.end();
-            */
             
             if (animations[id] != nullptr) {
                 delete animations[id];
@@ -547,10 +552,25 @@ class AnimationManager
             }
         }
 
-        /* --- LADEFUNKTION AUSKOMMENTIERT ---
         int createAnimationsFromStorage()
-        { ... }
-        */
+        {
+            String key = "";
+            int found = 0;
+            for (int i = 0; i < 100; i++)
+            {
+                key = "a" + String(i);
+                AnimationSetting tempSettings;
+                _storage.begin("anim_data", false);
+                size_t len = _storage.getBytes(key.c_str(), &tempSettings, sizeof(AnimationSetting));
+                if (len == sizeof(AnimationSetting)) 
+                {   
+                    createAnimation(&tempSettings, false);
+                    found++;
+                }
+                _storage.end();
+            }
+            return found;
+        }
 
         AnimationSetting* createSettingsStaticColor(unsigned long color, uint8_t brightness, String name)
         {
@@ -606,6 +626,6 @@ class AnimationManager
         IAnimation* animations[100];
         CRGB *leds;
         int rgb_count = 0;
-        // Preferences _storage; // <-- AUSKOMMENTIERT
+        Preferences _storage;
         int animation_count = 0;
 };
