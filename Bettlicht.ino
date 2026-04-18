@@ -212,9 +212,15 @@ const char index_html[] PROGMEM = R"rawliteral(
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ index: index })
-      }).then(() => {
-        currentIndex = index;
-        renderPlaylist();
+      }).then(response => {
+        // Prüfen, ob der ESP32 den Befehl wirklich akzeptiert hat
+        if (response.ok) {
+          currentIndex = index;
+          renderPlaylist();
+        } else {
+          // Wenn der ESP32 400 sendet (Index Fehler), weise den Nutzer darauf hin
+          alert("Fehler! Bitte drücke zuerst auf 'Reihenfolge & Playlist speichern', bevor du neue Einträge abspielst.");
+        }
       });
     }
 
