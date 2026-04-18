@@ -133,6 +133,7 @@ class StaticColorAnimation: public IAnimation
             color |= settings->data[1];
             color |= (((unsigned long)settings->data[2]) << 8);
             color |= (((unsigned long)settings->data[3]) << 16);
+            update_needed = true;
         }
     
     private:
@@ -211,8 +212,7 @@ class BlinkAnimation: public IAnimation
                     break;
                 default:
                     return false;
-            }
-                    
+            } 
             return true;
         }
 
@@ -274,6 +274,7 @@ class BlinkAnimation: public IAnimation
             color_off |= settings->data[4];
             color_off |= (((unsigned long)settings->data[5]) << 8);
             color_off |= (((unsigned long)settings->data[6]) << 16);
+            update_needed = true;
         }
     
     private:
@@ -421,6 +422,7 @@ public:
         
         if(speed == 0) speed = 1;
         ChangePalette(newPalID);
+        update_needed = true;
     }
 
 private:
