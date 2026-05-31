@@ -4,6 +4,30 @@
 #define STATIC_COLOR 1
 #define BLINK 2
 #define PALETTE 3
+#define FIRE_2D 4
+
+// ==========================================
+// EIGENE FARBPALETTEN FÜR REALISTISCHERES FEUER
+// ==========================================
+// Das Standard HeatColors_p von FastLED wird sehr schnell weiß.
+// Diese Palette hat ein viel breiteres Band für sattes Orange und Gelb.
+DEFINE_GRADIENT_PALETTE( BetterFire_gp ) {
+  0,     0,   0,   0,   // Schwarz (Hintergrund)
+  50,  255,   0,   0,   // Rot
+  120, 255, 100,   0,   // Sattes Orange
+  190, 255, 200,   0,   // Leuchtendes Gelb
+  255, 255, 255, 150    // Gelb-Weiß (nur an den allerheißesten Funken)
+};
+
+// Das Standard LavaColors_p von FastLED ist fast nur Rot und Schwarz.
+// Diese Palette fügt Orange und Gelb für die "heißen Risse" in der Lava hinzu.
+DEFINE_GRADIENT_PALETTE( BetterLava_gp ) {
+  0,     0,   0,   0,   // Schwarz (Lavakruste)
+  80,  150,   0,   0,   // Dunkelrot (abgekühlt)
+  150, 220,   0,   0,   // Rot
+  200, 255,  80,   0,   // Orange-Rot
+  255, 255, 180,   0    // Gelblich-Orange (heißeste Risse)
+};
 
 typedef struct{
     uint8_t id;
@@ -56,7 +80,7 @@ class StaticColorAnimation: public IAnimation
         }
         bool Update(unsigned long tick) override
         {
-            if(update_needed) //tick gets set to zero only if animation(program) got changed
+            if(update_needed) 
             {
                 RestartAnimation();
                 update_needed=false;
@@ -296,7 +320,7 @@ public:
     {
         leds = targetArray;
         rgb_count = RGBCount;
-        currentPalette = RainbowColors_p; // Standard
+        currentPalette = RainbowColors_p;
     }
 
     void ResetSettings() override
@@ -334,10 +358,10 @@ public:
         {
             case 0: currentPalette = RainbowColors_p; break;
             case 1: currentPalette = PartyColors_p; break;
-            case 2: currentPalette = OceanColors_p; break;     // Blau/Weiß/Türkis
-            case 3: currentPalette = ForestColors_p; break;    // Grün/Braun
-            case 4: currentPalette = HeatColors_p; break;      // Rot/Gelb/Weiß (Feuer)
-            case 5: currentPalette = LavaColors_p; break;      // Rot/Schwarz/Orange
+            case 2: currentPalette = OceanColors_p; break;     
+            case 3: currentPalette = ForestColors_p; break;    
+            case 4: currentPalette = BetterFire_gp; break;  // Eigene Feuer-Palette
+            case 5: currentPalette = BetterLava_gp; break;  // Eigene Lava-Palette
             case 6: 
                 currentPalette = CRGBPalette16(CRGB::Black, CRGB::Green, CRGB::Black, CRGB::DarkGreen);
                 break;
@@ -349,19 +373,19 @@ public:
     {
         switch(index)
         {
-            case 0: // Palette ID
+            case 0: 
                 if(value > 255) return false;
                 ChangePalette((uint8_t)value);
                 break;
-            case 1: // Speed
+            case 1: 
                 if(value > 255) return false;
                 speed = (uint8_t)value;
                 break;
-            case 2: // Delta (Streckung)
+            case 2: 
                 if(value > 255) return false;
                 delta = (uint8_t)value;
                 break;
-            case 3: // Brightness
+            case 3: 
                 if(value > 255) return false;
                 brightness = (uint8_t)value;
                 break;
@@ -385,7 +409,7 @@ public:
 
     String GetAvailableSettings() override
     {
-        return "0: Palette ID (0=Rainbow, 1=Party, 2=Ocean, 3=Forest, 4=Heat, 5=Lava, 6=Matrix)\n1: Speed\n2: Delta\n3: Brightness";
+        return "0: Palette ID\n1: Speed\n2: Delta\n3: Brightness";
     }
 
     String GetName() override
@@ -441,6 +465,318 @@ private:
     bool update_needed = false;
 };
 
+// ==========================================
+// Horizontale 2D Feuersimulation
+// ==========================================
+struct FireSpark {
+    bool active;            
+    float position;         
+    float velocity;         
+    uint8_t intensity;      
+    uint8_t cooling_rate;   
+};
+
+class HorizontalFireAnimation : public IAnimation {
+public:
+    HorizontalFireAnimation(struct CRGB *targetArray, int RGBCount)
+    {
+        leds = targetArray;
+        rgb_count = RGBCount;
+        
+        heat = new uint8_t[rgb_count];
+        temp_heat = new uint8_t[rgb_count]; 
+        
+        memset(heat, 0, rgb_count);
+        memset(temp_heat, 0, rgb_count);
+        
+        num_embers = (rgb_count / 18) + 1;
+        ember_positions = new uint16_t[num_embers];
+        
+        for (uint8_t i = 0; i < num_embers; i++) {
+            uint16_t sector_size = rgb_count / num_embers;
+            uint16_t base_pos = i * sector_size;
+            ember_positions[i] = base_pos + random8(0, sector_size / 2);
+        }
+        
+        for (uint8_t i = 0; i < MAX_SPARKS; i++) {
+            sparks[i].active = false;
+        }
+
+        ChangePalette(4); // Default: Eigene Feuerpalette
+    }
+
+    virtual ~HorizontalFireAnimation() {
+        delete[] heat;
+        delete[] temp_heat;
+        delete[] ember_positions;
+    }
+
+    void ResetSettings() override {
+        brightness = 255;
+        cooling_base = 45;
+        sparking_chance = 110;
+        paletteID = 4;
+        ChangePalette(paletteID);
+    }
+
+    void RestartAnimation() override {
+        FastLED.setBrightness(brightness);
+        memset(heat, 0, rgb_count); 
+        for (uint8_t i = 0; i < MAX_SPARKS; i++) {
+            sparks[i].active = false;
+        }
+    }
+
+    bool Update(unsigned long tick) override {
+        // --- 1. Thermodynamik Update ---
+        for (uint16_t i = 0; i < rgb_count; i++) {
+            uint8_t random_cooling = random8(0, ((cooling_base * 10) / rgb_count) + 2);
+            heat[i] = qsub8(heat[i], random_cooling);
+        }
+        
+        diffuseHeatBidirectional();
+        injectEmbers();
+        updateSparks();
+
+        // --- 2. Render to LEDs ---
+        // Die Helligkeit bleibt nun konstant, um ein hektisches Stroboskop-Flackern zu vermeiden
+        if(FastLED.getBrightness() != brightness) {
+            FastLED.setBrightness(brightness);
+        }
+
+        for (uint16_t i = 0; i < rgb_count; i++) {
+            uint8_t colorIndex = scale8(heat[i], 240);
+            leds[i] = ColorFromPalette(firePalette, colorIndex);
+        }
+        
+        for (uint8_t i = 0; i < MAX_SPARKS; i++) {
+            if (sparks[i].active) {
+                uint16_t int_pos = (uint16_t)sparks[i].position;
+                float fraction = sparks[i].position - int_pos;
+                uint8_t primary_intensity = sparks[i].intensity * (1.0f - fraction);
+                uint8_t secondary_intensity = sparks[i].intensity * fraction;
+                
+                if (int_pos < rgb_count) {
+                    leds[int_pos] += CRGB(primary_intensity, primary_intensity, primary_intensity / 2);
+                }
+                if (int_pos + 1 < rgb_count) {
+                    leds[int_pos + 1] += CRGB(secondary_intensity, secondary_intensity, secondary_intensity / 2);
+                }
+            }
+        }
+
+        return true; 
+    }
+
+    void ChangePalette(uint8_t id) {
+        paletteID = id;
+        switch(id) {
+            case 0: firePalette = RainbowColors_p; break;
+            case 1: firePalette = PartyColors_p; break;
+            case 2: firePalette = OceanColors_p; break;     
+            case 3: firePalette = ForestColors_p; break;    
+            case 4: firePalette = BetterFire_gp; break;     // <-- Nutzen der neuen Feuerpalette
+            case 5: firePalette = BetterLava_gp; break;     // <-- Nutzen der neuen Lavapalette
+            case 6: firePalette = CRGBPalette16(CRGB::Black, CRGB::Green, CRGB::Black, CRGB::DarkGreen); break;
+            default: firePalette = BetterFire_gp; break;
+        }
+    }
+
+    int GetSetting(int index) override {
+        switch(index) {
+            case 0: return cooling_base;
+            case 1: return sparking_chance;
+            case 2: return paletteID;
+            case 3: return brightness;
+            default: return -1;
+        }
+    }
+
+    String GetAvailableSettings() override { return "0: Cooling\n1: Sparking\n2: Palette\n3: Brightness"; }
+    String GetName() override { return name; }
+
+    void getAnimationSetting(AnimationSetting* settings) override {
+        settings->id = id;
+        settings->type = FIRE_2D;
+
+        memset(settings->name, 0, sizeof(settings->name));
+        int len = name.length();
+        if (len > 13) len = 13;
+        memcpy(settings->name, name.c_str(), len);
+
+        settings->data[0] = brightness;
+        settings->data[1] = cooling_base;
+        settings->data[2] = sparking_chance;
+        settings->data[3] = paletteID;
+    }
+
+    void applyAnimationSetting(AnimationSetting* settings) override {
+        id = settings->id;
+        char tempName[14] = {0};
+        strncpy(tempName, settings->name, 13);
+        name = String(tempName);
+        
+        brightness = settings->data[0];
+        cooling_base = settings->data[1];
+        sparking_chance = settings->data[2];
+        ChangePalette(settings->data[3]);
+        
+        if(cooling_base == 0) cooling_base = 45; 
+    }
+
+private:
+    uint8_t id = 0;
+    String name = "";
+    CRGB *leds;
+    int rgb_count;
+    
+    CRGBPalette16 firePalette;
+    uint8_t brightness = 255;
+    uint8_t paletteID = 4;
+
+    uint8_t cooling_base = 45;
+    uint8_t sparking_chance = 110;
+
+    uint8_t *heat;
+    uint8_t *temp_heat;
+    uint16_t *ember_positions;
+    uint8_t num_embers;
+
+    static const uint8_t MAX_SPARKS = 20;
+    FireSpark sparks[MAX_SPARKS];
+
+    void diffuseHeatBidirectional() {
+        for (uint16_t i = 0; i < rgb_count; i++) {
+            uint16_t left_heat = (i > 0) ? heat[i - 1] : 0;
+            uint16_t right_heat = (i < rgb_count - 1) ? heat[i + 1] : 0;
+            uint16_t center_heat = heat[i];
+            temp_heat[i] = (center_heat >> 1) + (left_heat >> 2) + (right_heat >> 2);
+        }
+        memcpy(heat, temp_heat, rgb_count);
+    }
+
+    void injectEmbers() {
+        bool wind_gust = random8() < 20; // Seltenere "Windstöße", damit es ruhiger wirkt
+        
+        for (uint8_t i = 0; i < num_embers; i++) {
+            uint16_t pos = ember_positions[i];
+            
+            uint8_t heat_added = random8(70, 180);
+            
+            // Verstärktes lokales Flackern je nach Wind
+            if (wind_gust) {
+                heat_added = random8(150, 220); // Sanfteres Auflodern
+            } else if (random8() < 30) {
+                heat_added = random8(30, 70);   // Glut sackt nicht mehr ganz so extrem ab
+            }
+            
+            heat[pos] = qadd8(heat[pos], heat_added);
+            
+            if (random8() < sparking_chance) {
+                spawnSpark(pos);
+            }
+        }
+    }
+
+    void spawnSpark(uint16_t origin_pos) {
+        for (uint8_t i = 0; i < MAX_SPARKS; i++) {
+            if (!sparks[i].active) {
+                sparks[i].active = true;
+                sparks[i].position = (float)origin_pos;
+                
+                float vel = (random8(0, 240) / 100.0f) - 1.2f;
+                if(vel >= 0.0f && vel < 0.35f) vel = 0.4f;
+                if(vel < 0.0f && vel > -0.35f) vel = -0.4f;
+                
+                sparks[i].velocity = vel;
+                sparks[i].intensity = random8(210, 255);
+                sparks[i].cooling_rate = random8(8, 25);
+                break;
+            }
+        }
+    }
+
+    void updateSparks() {
+        for (uint8_t i = 0; i < MAX_SPARKS; i++) {
+            if (sparks[i].active) {
+                sparks[i].position += sparks[i].velocity;
+                sparks[i].intensity = qsub8(sparks[i].intensity, sparks[i].cooling_rate);
+                sparks[i].velocity *= 0.96f;
+                
+                if (sparks[i].intensity < 10 || sparks[i].position < 0 || sparks[i].position >= rgb_count) {
+                    sparks[i].active = false;
+                }
+            }
+        }
+    }
+};
+
+// ==========================================
+// BCD Clock Overlay
+// ==========================================
+class BCDClockOverlay {
+public:
+    BCDClockOverlay(struct CRGB *targetArray, int RGBCount)
+    {
+        leds = targetArray;
+        rgb_count = RGBCount;
+    }
+
+    void setEnabled(bool en) { enabled = en; }
+    bool isEnabled() { return enabled; }
+    
+    void setColor(CRGB c) { color = c; }
+
+    // Wird nach der Haupt-Animation und VOR FastLED.show() aufgerufen
+    void UpdateAndDraw(uint8_t hours, uint8_t minutes, bool blinkTick) {
+        if (!enabled || rgb_count < 14) return;
+
+        int start_idx = rgb_count - 14;
+
+        // 1. Hintergrund der letzten 14 LEDs abdunkeln (damit sich die Uhr abhebt)
+        for(int i = 0; i < 14; i++) {
+            // Skaliert die Helligkeit der bestehenden Animation auf ca. 15% runter
+            leds[start_idx + i].nscale8(40); 
+        }
+
+        // BCD Layout (14 LEDs):
+        // [0-1] Stunden Zehner
+        // [2-5] Stunden Einer
+        // [6-8] Minuten Zehner
+        // [9-12] Minuten Einer
+        // [13]   Trenner-Punkt (Blinkend)
+
+        drawBits(start_idx, 2, hours / 10);
+        drawBits(start_idx + 2, 4, hours % 10);
+
+        drawBits(start_idx + 6, 3, minutes / 10);
+        drawBits(start_idx + 9, 4, minutes % 10);
+
+        if (blinkTick) {
+            leds[start_idx + 13] = color;
+        }
+    }
+
+private:
+    CRGB *leds;
+    int rgb_count;
+    bool enabled = false;
+    CRGB color = CRGB::White; // Standardfarbe für die aktive Uhr
+
+    void drawBits(int start_idx, int num_bits, uint8_t value) {
+        for (int i = 0; i < num_bits; i++) {
+            // MSB first (Höchstwertiges Bit zuerst, d.h. "links")
+            int bit_pos = num_bits - 1 - i;
+            if ((value >> bit_pos) & 0x01) {
+                leds[start_idx + i] = color;
+            }
+        }
+    }
+};
+
+// ==========================================
+// AnimationManager
+// ==========================================
 class AnimationManager
 {
     public: 
@@ -504,7 +840,12 @@ class AnimationManager
             {
                 animation = new PaletteAnimation(leds, rgb_count);
             }
+            else if(settings->type == FIRE_2D)
+            {
+                animation = new HorizontalFireAnimation(leds, rgb_count);
+            }
             else return -3;
+            
             settings->id = i;
             animation->applyAnimationSetting(settings);
             
@@ -607,7 +948,6 @@ class AnimationManager
         AnimationSetting* createSettingsPalette(uint8_t paletteID, uint8_t speed, uint8_t delta, uint8_t brightness, String name)
         {
             if (name.length() > 13) return nullptr;
-            
             AnimationSetting* settings = new AnimationSetting();
             settings->type = PALETTE;
             memset(settings->name, 0, sizeof(settings->name));
@@ -616,6 +956,20 @@ class AnimationManager
             settings->data[1] = paletteID;
             settings->data[2] = speed;
             settings->data[3] = delta;
+            return settings;
+        }
+
+        AnimationSetting* createSettingsFire2D(uint8_t cooling_base, uint8_t sparking_chance, uint8_t paletteID, uint8_t brightness, String name)
+        {
+            if (name.length() > 13) return nullptr;
+            AnimationSetting* settings = new AnimationSetting();
+            settings->type = FIRE_2D;
+            memset(settings->name, 0, sizeof(settings->name));
+            memcpy(settings->name, name.c_str(), name.length());
+            settings->data[0] = brightness;
+            settings->data[1] = cooling_base;
+            settings->data[2] = sparking_chance;
+            settings->data[3] = paletteID;
             return settings;
         }
 

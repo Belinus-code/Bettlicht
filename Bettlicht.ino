@@ -6,8 +6,10 @@
 #include "animations.h"
 #include <FastLED.h>
 #include <vector>
+#include <time.h>
+#include <PubSubClient.h>
 
-// --- NEUE WEB-BIBLIOTHEKEN ---
+// --- WEB-BIBLIOTHEKEN ---
 #include <ESPAsyncWebServer.h>
 #include <AsyncJson.h>
 #include <ArduinoJson.h>
@@ -16,6 +18,12 @@ const char* ssid = WIFI_SSID;
 const char* password = WIFI_PASS;
 const char* ota_pass = OTA_PASS;
 
+// ===== MQTT Setup =====
+const char* mqtt_server = BROKER_HOST_ADRESS;
+const int mqtt_port = BROKER_HOST_PORT;
+const char* mqtt_user = BROKER_USER;
+const char* mqtt_pass = BROKER_PASSWORD;
+
 #define LED_PIN D9
 #define TOUCH_PIN D2
 
@@ -23,12 +31,16 @@ CRGB leds[RGB_COUNT];
 
 // ===== Dynamische Variablen =====
 int touchThreshold = 28000; 
-std::vector<String> playlist; // Ersetzt das alte statische Array
+std::vector<String> playlist;
 int currentAnimIndex = 0; 
 
 Preferences preferences;
 AnimationManager animationManager(leds, RGB_COUNT, preferences);
 IAnimation* active_animation = nullptr;
+
+// NEU: BCD Uhr Overlay
+BCDClockOverlay clockOverlay(leds, RGB_COUNT);
+bool clockEnabled = false;
 
 // ===== Touch & Timer Variables =====
 bool isTouched = false;
@@ -46,8 +58,7 @@ AsyncWebServer server(80);
 
 // ===== Hilfsfunktionen für die Playlist =====
 void loadPlaylist() {
-  // Lädt die Liste als String, Standardwert falls leer:
-  String saved = preferences.getString("playlist", "OFF,WARM_1,WARM_2,WARM_3,WARM_4,WARM_5,NIGHT_BLUE,RAINBOW");
+  String saved = preferences.getString("playlist", "OFF,WARM_1,WARM_2,NIGHT_BLUE,RAINBOW,FEUER");
   playlist.clear();
   int start = 0;
   int end = saved.indexOf(',');
@@ -79,7 +90,7 @@ const char index_html[] PROGMEM = R"rawliteral(
   <style>
     body { font-family: Arial, sans-serif; background-color: #121212; color: #ffffff; padding: 20px; max-width: 800px; margin: auto; }
     .card { background-color: #1e1e1e; padding: 20px; border-radius: 10px; margin-bottom: 20px; }
-    input[type=number], input[type=text], select, input[type=color] { width: 100%; padding: 10px; margin-top: 5px; margin-bottom: 15px; box-sizing: border-box; background: #333; color: white; border: 1px solid #555; border-radius: 5px; }
+    input[type=number], input[type=text], select, input[type=color], input[type=range] { width: 100%; padding: 10px; margin-top: 5px; margin-bottom: 15px; box-sizing: border-box; background: #333; color: white; border: 1px solid #555; border-radius: 5px; }
     input[type=color] { height: 50px; padding: 2px; cursor: pointer; }
     button { background: #007bff; color: white; border: none; padding: 10px 15px; margin: 2px; border-radius: 5px; cursor: pointer; font-weight: bold; }
     button:hover { background: #0056b3; }
@@ -110,6 +121,13 @@ const char index_html[] PROGMEM = R"rawliteral(
       <button onclick="updateThreshold()">Speichern</button>
     </div>
     <small id="threshStatus" style="color: #888;"></small>
+
+    <hr style="border-color: #333; margin: 15px 0;">
+    
+    <div style="display: flex; justify-content: space-between; align-items: center;">
+      <label style="margin: 0;">BCD Uhr Overlay (letzte 14 LEDs)</label>
+      <button id="clockBtn" class="btn-danger" onclick="toggleClock()">Aus</button>
+    </div>
   </div>
 
   <div class="card">
@@ -142,6 +160,7 @@ const char index_html[] PROGMEM = R"rawliteral(
         <option value="1">Static Color (Einfarbig)</option>
         <option value="2">Blink</option>
         <option value="3">Palette (Verlauf)</option>
+        <option value="4">2D Feuer</option>
       </select>
 
       <div id="fieldsStatic" class="form-group">
@@ -155,10 +174,28 @@ const char index_html[] PROGMEM = R"rawliteral(
       <div id="fieldsPalette" class="form-group">
         <label>Palette wählen</label>
         <select id="paletteId">
-          <option value="0">Regenbogen</option><option value="1">Party (Bunt)</option><option value="2">Ozean (Blau/Weiß)</option><option value="3">Wald (Grün/Braun)</option><option value="4">Hitze (Feuer)</option><option value="5">Lava (Rot/Orange)</option><option value="6">Matrix (Grün/Schwarz)</option>
+          <option value="0">Regenbogen</option><option value="1">Party (Bunt)</option><option value="2">Ozean (Blau/Weiß)</option><option value="3">Wald (Grün/Braun)</option><option value="4">Hitze (Klassisch)</option><option value="5">Lava (Rot/Orange)</option><option value="6">Matrix (Grün/Schwarz)</option>
         </select>
         <label>Geschwindigkeit (1-255)</label><input type="number" id="paletteSpeed" min="1" max="255" value="10">
         <label>Streckung / Delta (1-255)</label><input type="number" id="paletteDelta" min="1" max="255" value="3">
+      </div>
+      <div id="fieldsFire" class="form-group">
+        <label>Kühlrate (Flammenhöhe, ~20-100)</label>
+        <input type="range" id="fireCooling" min="10" max="150" value="45" oninput="document.getElementById('coolVal').innerText = this.value">
+        <div style="text-align:right; margin-top:-10px; margin-bottom:10px;"><small id="coolVal">45</small></div>
+        
+        <label>Funken-Wahrscheinlichkeit (0-255)</label>
+        <input type="range" id="fireSparks" min="0" max="255" value="110" oninput="document.getElementById('sparkVal').innerText = this.value">
+        <div style="text-align:right; margin-top:-10px; margin-bottom:10px;"><small id="sparkVal">110</small></div>
+
+        <label>Feuer-Farbe (Palette)</label>
+        <select id="firePaletteId">
+          <option value="4" selected>Standard (Feuer)</option>
+          <option value="5">Lava</option>
+          <option value="6">Matrix (Grünes Feuer)</option>
+          <option value="2">Ozean (Blaues Feuer)</option>
+          <option value="0">Regenbogen-Feuer</option>
+        </select>
       </div>
 
       <div style="display: flex; justify-content: flex-end; gap: 10px; margin-top: 20px;">
@@ -172,6 +209,7 @@ const char index_html[] PROGMEM = R"rawliteral(
     let globalPlaylist = [];
     let globalAnimations = [];
     let currentIndex = -1;
+    let clockEnabled = false;
 
     function loadData() {
       fetch('/api/config').then(r => r.json()).then(data => {
@@ -179,6 +217,8 @@ const char index_html[] PROGMEM = R"rawliteral(
            document.getElementById('threshInput').value = data.threshold;
         }
         currentIndex = data.currentIndex;
+        clockEnabled = data.clockEnabled;
+        updateClockBtn();
       });
 
       fetch('/api/animations').then(r => r.json()).then(data => {
@@ -189,12 +229,15 @@ const char index_html[] PROGMEM = R"rawliteral(
       });
     }
 
-    // Polling: Fragt alle 2 Sekunden unauffällig nach, ob sich das Licht geändert hat (z.B. durch Touch am Bett)
     setInterval(() => {
       fetch('/api/config').then(r => r.json()).then(data => {
         if(currentIndex !== data.currentIndex) {
             currentIndex = data.currentIndex;
-            renderPlaylist(); // Update UI
+            renderPlaylist(); 
+        }
+        if(clockEnabled !== data.clockEnabled) {
+            clockEnabled = data.clockEnabled;
+            updateClockBtn();
         }
       });
     }, 2000);
@@ -206,20 +249,40 @@ const char index_html[] PROGMEM = R"rawliteral(
       .then(() => { document.getElementById('threshStatus').innerText = "Gespeichert!"; setTimeout(() => document.getElementById('threshStatus').innerText = "", 2000); });
     }
 
-    // --- LIVE STEUERUNG ---
+    function updateClockBtn() {
+      let btn = document.getElementById('clockBtn');
+      if(clockEnabled) {
+        btn.className = "btn-success";
+        btn.innerText = "An";
+      } else {
+        btn.className = "btn-danger";
+        btn.innerText = "Aus";
+      }
+    }
+
+    function toggleClock() {
+      let newState = !clockEnabled;
+      fetch('/api/clock', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ enabled: newState })
+      }).then(() => {
+        clockEnabled = newState;
+        updateClockBtn();
+      });
+    }
+
     function playAnimation(index) {
       fetch('/api/play', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ index: index })
       }).then(response => {
-        // Prüfen, ob der ESP32 den Befehl wirklich akzeptiert hat
-        if (response.ok) {
+        if(response.ok) {
           currentIndex = index;
           renderPlaylist();
         } else {
-          // Wenn der ESP32 400 sendet (Index Fehler), weise den Nutzer darauf hin
-          alert("Fehler! Bitte drücke zuerst auf 'Reihenfolge & Playlist speichern', bevor du neue Einträge abspielst.");
+          alert("Fehler! Bitte drücke zuerst auf 'Reihenfolge & Playlist speichern', bevor du diese Animation abspielst.");
         }
       });
     }
@@ -258,7 +321,7 @@ const char index_html[] PROGMEM = R"rawliteral(
     function renderAnimations() {
       let html = "";
       globalAnimations.forEach(anim => {
-        let typeName = anim.type === 1 ? "Static" : anim.type === 2 ? "Blink" : "Palette";
+        let typeName = anim.type === 1 ? "Static" : anim.type === 2 ? "Blink" : anim.type === 3 ? "Palette" : "2D Feuer";
         html += `<div class="list-item">
                    <span><strong>${anim.name}</strong> <small>(${typeName})</small></span>
                    <div class="controls">
@@ -283,6 +346,7 @@ const char index_html[] PROGMEM = R"rawliteral(
       document.getElementById('fieldsStatic').style.display = (type == 1) ? 'block' : 'none';
       document.getElementById('fieldsBlink').style.display = (type == 2) ? 'block' : 'none';
       document.getElementById('fieldsPalette').style.display = (type == 3) ? 'block' : 'none';
+      document.getElementById('fieldsFire').style.display = (type == 4) ? 'block' : 'none';
     }
 
     function openEditor(anim) {
@@ -293,9 +357,24 @@ const char index_html[] PROGMEM = R"rawliteral(
         document.getElementById('animName').value = anim.name;
         document.getElementById('animType').value = anim.type;
         document.getElementById('animBrightness').value = anim.data[0];
-        if(anim.type == 1) { document.getElementById('staticColor').value = rgbToHex(anim.data[3], anim.data[2], anim.data[1]); } 
-        else if(anim.type == 2) { document.getElementById('blinkColorOn').value = rgbToHex(anim.data[3], anim.data[2], anim.data[1]); document.getElementById('blinkColorOff').value = rgbToHex(anim.data[6], anim.data[5], anim.data[4]); document.getElementById('blinkCycle').value = anim.data[7]; } 
-        else if(anim.type == 3) { document.getElementById('paletteId').value = anim.data[1]; document.getElementById('paletteSpeed').value = anim.data[2]; document.getElementById('paletteDelta').value = anim.data[3]; }
+        
+        if(anim.type == 1) { 
+            document.getElementById('staticColor').value = rgbToHex(anim.data[3], anim.data[2], anim.data[1]); 
+        } else if(anim.type == 2) { 
+            document.getElementById('blinkColorOn').value = rgbToHex(anim.data[3], anim.data[2], anim.data[1]); 
+            document.getElementById('blinkColorOff').value = rgbToHex(anim.data[6], anim.data[5], anim.data[4]); 
+            document.getElementById('blinkCycle').value = anim.data[7]; 
+        } else if(anim.type == 3) { 
+            document.getElementById('paletteId').value = anim.data[1]; 
+            document.getElementById('paletteSpeed').value = anim.data[2]; 
+            document.getElementById('paletteDelta').value = anim.data[3]; 
+        } else if(anim.type == 4) {
+            document.getElementById('fireCooling').value = anim.data[1]; 
+            document.getElementById('coolVal').innerText = anim.data[1]; 
+            document.getElementById('fireSparks').value = anim.data[2]; 
+            document.getElementById('sparkVal').innerText = anim.data[2]; 
+            document.getElementById('firePaletteId').value = anim.data[3]; 
+        }
       } else {
         document.getElementById('editorTitle').innerText = "Neue Animation erstellen";
         document.getElementById('animId').value = 255; 
@@ -310,9 +389,25 @@ const char index_html[] PROGMEM = R"rawliteral(
       let type = parseInt(document.getElementById('animType').value);
       let dataBytes = new Array(16).fill(0);
       dataBytes[0] = parseInt(document.getElementById('animBrightness').value);
-      if(type === 1) { let rgb = hexToRgb(document.getElementById('staticColor').value); dataBytes[1] = rgb.b; dataBytes[2] = rgb.g; dataBytes[3] = rgb.r; } 
-      else if(type === 2) { let rgbOn = hexToRgb(document.getElementById('blinkColorOn').value); let rgbOff = hexToRgb(document.getElementById('blinkColorOff').value); dataBytes[1] = rgbOn.b; dataBytes[2] = rgbOn.g; dataBytes[3] = rgbOn.r; dataBytes[4] = rgbOff.b; dataBytes[5] = rgbOff.g; dataBytes[6] = rgbOff.r; dataBytes[7] = parseInt(document.getElementById('blinkCycle').value); } 
-      else if(type === 3) { dataBytes[1] = parseInt(document.getElementById('paletteId').value); dataBytes[2] = parseInt(document.getElementById('paletteSpeed').value); dataBytes[3] = parseInt(document.getElementById('paletteDelta').value); }
+      
+      if(type === 1) { 
+          let rgb = hexToRgb(document.getElementById('staticColor').value); 
+          dataBytes[1] = rgb.b; dataBytes[2] = rgb.g; dataBytes[3] = rgb.r; 
+      } else if(type === 2) { 
+          let rgbOn = hexToRgb(document.getElementById('blinkColorOn').value); 
+          let rgbOff = hexToRgb(document.getElementById('blinkColorOff').value); 
+          dataBytes[1] = rgbOn.b; dataBytes[2] = rgbOn.g; dataBytes[3] = rgbOn.r; 
+          dataBytes[4] = rgbOff.b; dataBytes[5] = rgbOff.g; dataBytes[6] = rgbOff.r; 
+          dataBytes[7] = parseInt(document.getElementById('blinkCycle').value); 
+      } else if(type === 3) { 
+          dataBytes[1] = parseInt(document.getElementById('paletteId').value); 
+          dataBytes[2] = parseInt(document.getElementById('paletteSpeed').value); 
+          dataBytes[3] = parseInt(document.getElementById('paletteDelta').value); 
+      } else if(type === 4) {
+          dataBytes[1] = parseInt(document.getElementById('fireCooling').value); 
+          dataBytes[2] = parseInt(document.getElementById('fireSparks').value); 
+          dataBytes[3] = parseInt(document.getElementById('firePaletteId').value); 
+      }
 
       let payload = { id: parseInt(document.getElementById('animId').value), name: document.getElementById('animName').value, type: type, data: dataBytes };
       let btn = document.querySelector('.modal-content .btn-success');
@@ -335,14 +430,21 @@ void setup() {
   WiFi.setAutoReconnect(true);
   WiFi.begin(ssid, password);
   
+  // NEU: Zeitserver einrichten (Deutsche Zeit: CET/CEST)
+  configTzTime("CET-1CEST,M3.5.0,M10.5.0/3", "pool.ntp.org", "time.nist.gov");
+
   ArduinoOTA.setHostname("Bettlampe"); 
   ArduinoOTA.setPassword(ota_pass);
   ArduinoOTA.begin();
   
   preferences.begin("lampe", false); 
 
-  // --- Werte laden ---
   touchThreshold = preferences.getInt("threshold", 28000);
+  
+  // Uhr-Status laden
+  clockEnabled = preferences.getBool("clockEnabled", false);
+  clockOverlay.setEnabled(clockEnabled);
+
   loadPlaylist();
 
   FastLED.addLeds<WS2812B, LED_PIN, GRB>(leds, RGB_COUNT).setCorrection(TypicalLEDStrip);
@@ -350,7 +452,7 @@ void setup() {
 
   animationManager.begin();
 
-  // Standard-Animationen erstellen (nur wenn nicht vorhanden)
+  // Standard-Animationen erstellen
   if (animationManager.getAnimationIndex("OFF") == -1) {
     AnimationSetting* newSettings = animationManager.createSettingsStaticColor(0, 0, "OFF");
     animationManager.createAnimation(newSettings);
@@ -366,21 +468,6 @@ void setup() {
     animationManager.createAnimation(newSettings);
     delete newSettings;
   }
-  if (animationManager.getAnimationIndex("WARM_3") == -1) {
-    AnimationSetting* newSettings = animationManager.createSettingsStaticColor(0xFFB060, 150, "WARM_3");
-    animationManager.createAnimation(newSettings);
-    delete newSettings;
-  }
-  if (animationManager.getAnimationIndex("WARM_4") == -1) {
-    AnimationSetting* newSettings = animationManager.createSettingsStaticColor(0xFF8020, 110, "WARM_4");
-    animationManager.createAnimation(newSettings);
-    delete newSettings;
-  }
-  if (animationManager.getAnimationIndex("WARM_5") == -1) {
-    AnimationSetting* newSettings = animationManager.createSettingsStaticColor(0xFF4500, 100, "WARM_5");
-    animationManager.createAnimation(newSettings);
-    delete newSettings;
-  }
   if (animationManager.getAnimationIndex("NIGHT_BLUE") == -1) {
     AnimationSetting* newSettings = animationManager.createSettingsStaticColor(0x0000AA, 120, "NIGHT_BLUE");
     animationManager.createAnimation(newSettings);
@@ -391,8 +478,12 @@ void setup() {
     animationManager.createAnimation(newSettings);
     delete newSettings;
   }
-  // (Ich habe WARM_2 bis WARM_5 hier im Setup gekürzt, sie sind ja eh in den Preferences gespeichert, 
-  // falls du sie schon mal laufen hattest. Das spart Code.)
+  // NEU: Das Feuer standardmäßig anlegen, falls noch nicht da
+  if (animationManager.getAnimationIndex("FEUER") == -1) {
+    AnimationSetting* newSettings = animationManager.createSettingsFire2D(45, 110, 4, 255, "FEUER");
+    animationManager.createAnimation(newSettings);
+    delete newSettings;
+  }
 
   // Aktuellen Index laden
   currentAnimIndex = preferences.getInt("animIndex", 0); 
@@ -407,28 +498,26 @@ void setup() {
 
   // ===== WEBSERVER ROUTEN =====
   
-  // 1. Liefert die HTML Seite aus
   server.on("/", HTTP_GET, [](AsyncWebServerRequest *request){
     request->send_P(200, "text/html", index_html);
   });
 
-  // 2. API: Liefert den aktuellen Status als JSON
   server.on("/api/config", HTTP_GET, [](AsyncWebServerRequest *request){
     StaticJsonDocument<200> doc;
     doc["threshold"] = touchThreshold;
     doc["currentAnim"] = playlist[currentAnimIndex];
-    doc["currentIndex"] = currentAnimIndex; // <-- NEU: Verrät der Website, wo wir gerade sind
+    doc["currentIndex"] = currentAnimIndex;
+    doc["clockEnabled"] = clockEnabled; // NEU: Uhr-Status mitsenden
     String response;
     serializeJson(doc, response);
     request->send(200, "application/json", response);
   });
 
-  // 3. API: Empfängt einen neuen Threshold
   AsyncCallbackJsonWebHandler* threshHandler = new AsyncCallbackJsonWebHandler("/api/threshold", [](AsyncWebServerRequest *request, JsonVariant &json) {
     JsonObject jsonObj = json.as<JsonObject>();
     if(jsonObj.containsKey("value")) {
       touchThreshold = jsonObj["value"].as<int>();
-      preferences.putInt("threshold", touchThreshold); // Direkt dauerhaft speichern!
+      preferences.putInt("threshold", touchThreshold); 
       request->send(200, "text/plain", "OK");
     } else {
       request->send(400, "text/plain", "Bad Request");
@@ -436,18 +525,29 @@ void setup() {
   });
   server.addHandler(threshHandler);
 
-  // 4. API: Alle Animationen und die Playlist abrufen
+  // NEU: Route für den Uhr-Schalter
+  AsyncCallbackJsonWebHandler* clockHandler = new AsyncCallbackJsonWebHandler("/api/clock", [](AsyncWebServerRequest *request, JsonVariant &json) {
+    JsonObject jsonObj = json.as<JsonObject>();
+    if(jsonObj.containsKey("enabled")) {
+      clockEnabled = jsonObj["enabled"].as<bool>();
+      clockOverlay.setEnabled(clockEnabled);
+      if(!clockOverlay.isEnabled())active_animation->RestartAnimation();
+      preferences.putBool("clockEnabled", clockEnabled); 
+      request->send(200, "text/plain", "OK");
+    } else {
+      request->send(400, "text/plain", "Bad Request");
+    }
+  });
+  server.addHandler(clockHandler);
+
   server.on("/api/animations", HTTP_GET, [](AsyncWebServerRequest *request){
-    // Wir brauchen einen größeren Puffer für alle Animationen
     DynamicJsonDocument doc(4096); 
     
-    // Die Playlist laden
     JsonArray pl = doc.createNestedArray("playlist");
     for(size_t i = 0; i < playlist.size(); i++) {
       pl.add(playlist[i]);
     }
 
-    // Alle gespeicherten Animationen auslesen
     JsonArray anims = doc.createNestedArray("animations");
     for(int i = 0; i < 100; i++) {
       IAnimation* anim = animationManager.getAnimation(i);
@@ -458,9 +558,8 @@ void setup() {
         JsonObject obj = anims.createNestedObject();
         obj["id"] = s.id;
         obj["name"] = String(s.name);
-        obj["type"] = s.type; // 1=Static, 2=Blink, 3=Palette
+        obj["type"] = s.type; 
         
-        // Die 16 Daten-Bytes rüberschieben
         JsonArray dataArr = obj.createNestedArray("data");
         for(int d = 0; d < 16; d++) {
           dataArr.add(s.data[d]);
@@ -473,29 +572,23 @@ void setup() {
     request->send(200, "application/json", response);
   });
 
-  // 5. API: Eine neue Playlist (Reihenfolge) speichern
   AsyncCallbackJsonWebHandler* playlistHandler = new AsyncCallbackJsonWebHandler("/api/playlist", [](AsyncWebServerRequest *request, JsonVariant &json) {
     JsonArray jsonArray = json.as<JsonArray>();
     playlist.clear();
     for(JsonVariant v : jsonArray) {
       playlist.push_back(v.as<String>());
     }
-    savePlaylist(); // Deine Hilfsfunktion von vorhin
-    
-    // Aktuelle Animation sicherheitshalber auf 0 setzen, falls wir eine gelöscht haben
+    savePlaylist(); 
     currentAnimIndex = 0;
     preferences.putInt("animIndex", currentAnimIndex);
-    
     request->send(200, "text/plain", "Playlist gespeichert");
   });
   server.addHandler(playlistHandler);
 
-  // 6. API: Eine Animation erstellen oder überschreiben
   AsyncCallbackJsonWebHandler* saveAnimHandler = new AsyncCallbackJsonWebHandler("/api/animation", [](AsyncWebServerRequest *request, JsonVariant &json) {
     JsonObject obj = json.as<JsonObject>();
     AnimationSetting s;
     
-    // Wenn ID = 255 mitgeschickt wird, werten wir das als "Neue Animation"
     s.id = obj["id"] | 255; 
     String name = obj["name"].as<String>();
     strncpy(s.name, name.c_str(), 13);
@@ -507,10 +600,8 @@ void setup() {
     }
 
     if(s.id == 255 || animationManager.getAnimation(s.id) == nullptr) {
-      // Neu anlegen
       animationManager.createAnimation(&s, true); 
     } else {
-      // Bestehende überschreiben
       IAnimation* anim = animationManager.getAnimation(s.id);
       anim->applyAnimationSetting(&s);
       animationManager.saveAnimation(&s);
@@ -519,7 +610,6 @@ void setup() {
   });
   server.addHandler(saveAnimHandler);
 
-  // 7. API: Eine Animation komplett löschen
   server.on("/api/animation/delete", HTTP_POST, [](AsyncWebServerRequest *request){
     if(request->hasParam("id", true)) {
       int id = request->getParam("id", true)->value().toInt();
@@ -530,7 +620,6 @@ void setup() {
     }
   });
 
-  // 8. API: Live-Steuerung (Aktuelle Animation umschalten)
   AsyncCallbackJsonWebHandler* playHandler = new AsyncCallbackJsonWebHandler("/api/play", [](AsyncWebServerRequest *request, JsonVariant &json) {
     JsonObject jsonObj = json.as<JsonObject>();
     if(jsonObj.containsKey("index")) {
@@ -553,7 +642,6 @@ void setup() {
   });
   server.addHandler(playHandler);
 
-  // Server starten
   server.begin();
 }
 
@@ -570,7 +658,7 @@ void loop() {
   }
 
   long sensorValue = touchRead(TOUCH_PIN);
-  bool currentlyTouching = (sensorValue > touchThreshold); // Bei dir war es >
+  bool currentlyTouching = (sensorValue > touchThreshold);
 
   if (currentlyTouching && !isTouched && (millis() - lastReleaseTime >= TOUCH_COOLDOWN)) {
     isTouched = true;
@@ -579,11 +667,20 @@ void loop() {
   } 
   else if (currentlyTouching && isTouched) {
     if (!longPressHandled && (millis() - touchStartTime >= LONG_PRESS_TIME)) {
-      currentAnimIndex = 0; // Gehe zu Index 0 (OFF)
-      preferences.putInt("animIndex", currentAnimIndex); 
-      active_animation = animationManager.getAnimationByName(playlist[0]); 
-      if (active_animation != nullptr) {
-        active_animation->RestartAnimation();
+      
+      if (currentAnimIndex == 0) {
+        clockEnabled = !clockEnabled;
+        clockOverlay.setEnabled(clockEnabled);
+        if(!clockEnabled)active_animation->RestartAnimation();
+        preferences.putBool("clockEnabled", clockEnabled);
+      } else {
+        // Lampe ist AN -> Wir schalten die Lampe AUS (Index 0)
+        currentAnimIndex = 0;
+        preferences.putInt("animIndex", currentAnimIndex); 
+        active_animation = animationManager.getAnimationByName(playlist[0]); 
+        if (active_animation != nullptr) {
+          active_animation->RestartAnimation();
+        }
       }
       longPressHandled = true; 
     }
@@ -609,12 +706,31 @@ void loop() {
 
   if (millis() - lastUpdate >= UPDATE_INTERVAL) {
     lastUpdate = millis(); 
+    
+    bool flushRGB = false;
+    
+    // 1. Normale Animation berechnen
     if (active_animation != nullptr) {
-      bool flushRGB = active_animation->Update(cycle_counter);
-      if (flushRGB) {
-        FastLED.show();
+      flushRGB = active_animation->Update(cycle_counter);
+    }
+    
+    // 2. Uhr-Overlay drüberstempeln (falls aktiviert)
+    if (clockOverlay.isEnabled()) {
+      struct tm timeinfo;
+      // Holt die Zeit asynchron, blockiert nicht (Timeout 0)
+      if (getLocalTime(&timeinfo, 0)) {
+        // Sekundentakt berechnen: Die ersten 1000ms der Sekunde leuchten, danach aus
+        bool blinkTick = (millis() % 2000) < 1000;
+        clockOverlay.UpdateAndDraw(timeinfo.tm_hour, timeinfo.tm_min, blinkTick);
+        flushRGB = true; // Wir haben etwas auf die LEDs geschrieben, also sicherstellen, dass show() aufgerufen wird
       }
     }
+
+    // 3. Wenn sich etwas geändert hat -> Update an Streifen senden
+    if (flushRGB) {
+      FastLED.show();
+    }
+    
     cycle_counter++;
   }
 }
