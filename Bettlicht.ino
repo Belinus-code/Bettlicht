@@ -7,7 +7,7 @@
 #include <FastLED.h>
 #include <vector>
 #include <time.h>
-#include <PubSubClient.h>
+#include <MqttClient.h>
 
 // --- WEB-BIBLIOTHEKEN ---
 #include <ESPAsyncWebServer.h>
@@ -24,15 +24,19 @@ const int mqtt_port = BROKER_HOST_PORT;
 const char* mqtt_user = BROKER_USER;
 const char* mqtt_pass = BROKER_PASSWORD;
 
+WiFiClient espClient;
+MqttClient mqttClient(espClient);
+unsigned long lastMqttReconnectAttempt = 0;
+
 #define LED_PIN D9
 #define TOUCH_PIN D2
 
 CRGB leds[RGB_COUNT];
 
 // ===== Dynamische Variablen =====
-int touchThreshold = 28000; 
+int touchThreshold = 28000;
 std::vector<String> playlist;
-int currentAnimIndex = 0; 
+int currentAnimIndex = 0;
 
 Preferences preferences;
 AnimationManager animationManager(leds, RGB_COUNT, preferences);
@@ -45,13 +49,17 @@ bool clockEnabled = false;
 // ===== Touch & Timer Variables =====
 bool isTouched = false;
 unsigned long touchStartTime = 0;
-const unsigned long LONG_PRESS_TIME = 600; 
+const unsigned long LONG_PRESS_TIME = 600;
 bool longPressHandled = false;
 unsigned long lastReleaseTime = 0;
-const unsigned long TOUCH_COOLDOWN = 150; 
+const unsigned long TOUCH_COOLDOWN = 150;
 unsigned long cycle_counter = 0;
 unsigned long lastUpdate = 0;
 const unsigned long UPDATE_INTERVAL = 50;
+
+unsigned long lastMqttPublish = 0;
+const unsigned long MqttPublishCycle = 60000;
+bool forceMqttPublish = false;
 
 // ===== Webserver =====
 AsyncWebServer server(80);
@@ -429,18 +437,18 @@ void setup() {
   WiFi.mode(WIFI_STA);
   WiFi.setAutoReconnect(true);
   WiFi.begin(ssid, password);
-  
+
   // NEU: Zeitserver einrichten (Deutsche Zeit: CET/CEST)
   configTzTime("CET-1CEST,M3.5.0,M10.5.0/3", "pool.ntp.org", "time.nist.gov");
 
-  ArduinoOTA.setHostname("Bettlampe"); 
+  ArduinoOTA.setHostname("Bettlampe");
   ArduinoOTA.setPassword(ota_pass);
   ArduinoOTA.begin();
-  
-  preferences.begin("lampe", false); 
+
+  preferences.begin("lampe", false);
 
   touchThreshold = preferences.getInt("threshold", 28000);
-  
+
   // Uhr-Status laden
   clockEnabled = preferences.getBool("clockEnabled", false);
   clockOverlay.setEnabled(clockEnabled);
@@ -486,38 +494,38 @@ void setup() {
   }
 
   // Aktuellen Index laden
-  currentAnimIndex = preferences.getInt("animIndex", 0); 
+  currentAnimIndex = preferences.getInt("animIndex", 0);
   if (currentAnimIndex >= playlist.size() || currentAnimIndex < 0) {
-    currentAnimIndex = 0; 
+    currentAnimIndex = 0;
   }
 
   active_animation = animationManager.getAnimationByName(playlist[currentAnimIndex]);
   if (active_animation != nullptr) {
-      active_animation->RestartAnimation();
+    active_animation->RestartAnimation();
   }
 
   // ===== WEBSERVER ROUTEN =====
-  
-  server.on("/", HTTP_GET, [](AsyncWebServerRequest *request){
+
+  server.on("/", HTTP_GET, [](AsyncWebServerRequest* request) {
     request->send_P(200, "text/html", index_html);
   });
 
-  server.on("/api/config", HTTP_GET, [](AsyncWebServerRequest *request){
+  server.on("/api/config", HTTP_GET, [](AsyncWebServerRequest* request) {
     StaticJsonDocument<200> doc;
     doc["threshold"] = touchThreshold;
     doc["currentAnim"] = playlist[currentAnimIndex];
     doc["currentIndex"] = currentAnimIndex;
-    doc["clockEnabled"] = clockEnabled; // NEU: Uhr-Status mitsenden
+    doc["clockEnabled"] = clockEnabled;  // NEU: Uhr-Status mitsenden
     String response;
     serializeJson(doc, response);
     request->send(200, "application/json", response);
   });
 
-  AsyncCallbackJsonWebHandler* threshHandler = new AsyncCallbackJsonWebHandler("/api/threshold", [](AsyncWebServerRequest *request, JsonVariant &json) {
+  AsyncCallbackJsonWebHandler* threshHandler = new AsyncCallbackJsonWebHandler("/api/threshold", [](AsyncWebServerRequest* request, JsonVariant& json) {
     JsonObject jsonObj = json.as<JsonObject>();
-    if(jsonObj.containsKey("value")) {
+    if (jsonObj.containsKey("value")) {
       touchThreshold = jsonObj["value"].as<int>();
-      preferences.putInt("threshold", touchThreshold); 
+      preferences.putInt("threshold", touchThreshold);
       request->send(200, "text/plain", "OK");
     } else {
       request->send(400, "text/plain", "Bad Request");
@@ -526,13 +534,14 @@ void setup() {
   server.addHandler(threshHandler);
 
   // NEU: Route für den Uhr-Schalter
-  AsyncCallbackJsonWebHandler* clockHandler = new AsyncCallbackJsonWebHandler("/api/clock", [](AsyncWebServerRequest *request, JsonVariant &json) {
+  AsyncCallbackJsonWebHandler* clockHandler = new AsyncCallbackJsonWebHandler("/api/clock", [](AsyncWebServerRequest* request, JsonVariant& json) {
     JsonObject jsonObj = json.as<JsonObject>();
-    if(jsonObj.containsKey("enabled")) {
+    if (jsonObj.containsKey("enabled")) {
       clockEnabled = jsonObj["enabled"].as<bool>();
       clockOverlay.setEnabled(clockEnabled);
-      if(!clockOverlay.isEnabled())active_animation->RestartAnimation();
-      preferences.putBool("clockEnabled", clockEnabled); 
+      if (!clockOverlay.isEnabled()) active_animation->RestartAnimation();
+      preferences.putBool("clockEnabled", clockEnabled);
+      forceMqttPublish = true;
       request->send(200, "text/plain", "OK");
     } else {
       request->send(400, "text/plain", "Bad Request");
@@ -540,28 +549,28 @@ void setup() {
   });
   server.addHandler(clockHandler);
 
-  server.on("/api/animations", HTTP_GET, [](AsyncWebServerRequest *request){
-    DynamicJsonDocument doc(4096); 
-    
+  server.on("/api/animations", HTTP_GET, [](AsyncWebServerRequest* request) {
+    DynamicJsonDocument doc(4096);
+
     JsonArray pl = doc.createNestedArray("playlist");
-    for(size_t i = 0; i < playlist.size(); i++) {
+    for (size_t i = 0; i < playlist.size(); i++) {
       pl.add(playlist[i]);
     }
 
     JsonArray anims = doc.createNestedArray("animations");
-    for(int i = 0; i < 100; i++) {
+    for (int i = 0; i < 100; i++) {
       IAnimation* anim = animationManager.getAnimation(i);
-      if(anim != nullptr) {
+      if (anim != nullptr) {
         AnimationSetting s;
         anim->getAnimationSetting(&s);
-        
+
         JsonObject obj = anims.createNestedObject();
         obj["id"] = s.id;
         obj["name"] = String(s.name);
-        obj["type"] = s.type; 
-        
+        obj["type"] = s.type;
+
         JsonArray dataArr = obj.createNestedArray("data");
-        for(int d = 0; d < 16; d++) {
+        for (int d = 0; d < 16; d++) {
           dataArr.add(s.data[d]);
         }
       }
@@ -572,35 +581,35 @@ void setup() {
     request->send(200, "application/json", response);
   });
 
-  AsyncCallbackJsonWebHandler* playlistHandler = new AsyncCallbackJsonWebHandler("/api/playlist", [](AsyncWebServerRequest *request, JsonVariant &json) {
+  AsyncCallbackJsonWebHandler* playlistHandler = new AsyncCallbackJsonWebHandler("/api/playlist", [](AsyncWebServerRequest* request, JsonVariant& json) {
     JsonArray jsonArray = json.as<JsonArray>();
     playlist.clear();
-    for(JsonVariant v : jsonArray) {
+    for (JsonVariant v : jsonArray) {
       playlist.push_back(v.as<String>());
     }
-    savePlaylist(); 
+    savePlaylist();
     currentAnimIndex = 0;
     preferences.putInt("animIndex", currentAnimIndex);
     request->send(200, "text/plain", "Playlist gespeichert");
   });
   server.addHandler(playlistHandler);
 
-  AsyncCallbackJsonWebHandler* saveAnimHandler = new AsyncCallbackJsonWebHandler("/api/animation", [](AsyncWebServerRequest *request, JsonVariant &json) {
+  AsyncCallbackJsonWebHandler* saveAnimHandler = new AsyncCallbackJsonWebHandler("/api/animation", [](AsyncWebServerRequest* request, JsonVariant& json) {
     JsonObject obj = json.as<JsonObject>();
     AnimationSetting s;
-    
-    s.id = obj["id"] | 255; 
+
+    s.id = obj["id"] | 255;
     String name = obj["name"].as<String>();
     strncpy(s.name, name.c_str(), 13);
     s.type = obj["type"].as<int>();
-    
+
     JsonArray dataArr = obj["data"].as<JsonArray>();
-    for(int i=0; i<16; i++) {
+    for (int i = 0; i < 16; i++) {
       s.data[i] = dataArr[i] | 0;
     }
 
-    if(s.id == 255 || animationManager.getAnimation(s.id) == nullptr) {
-      animationManager.createAnimation(&s, true); 
+    if (s.id == 255 || animationManager.getAnimation(s.id) == nullptr) {
+      animationManager.createAnimation(&s, true);
     } else {
       IAnimation* anim = animationManager.getAnimation(s.id);
       anim->applyAnimationSetting(&s);
@@ -610,8 +619,8 @@ void setup() {
   });
   server.addHandler(saveAnimHandler);
 
-  server.on("/api/animation/delete", HTTP_POST, [](AsyncWebServerRequest *request){
-    if(request->hasParam("id", true)) {
+  server.on("/api/animation/delete", HTTP_POST, [](AsyncWebServerRequest* request) {
+    if (request->hasParam("id", true)) {
       int id = request->getParam("id", true)->value().toInt();
       animationManager.deleteAnimation(id);
       request->send(200, "text/plain", "Gelöscht");
@@ -620,18 +629,19 @@ void setup() {
     }
   });
 
-  AsyncCallbackJsonWebHandler* playHandler = new AsyncCallbackJsonWebHandler("/api/play", [](AsyncWebServerRequest *request, JsonVariant &json) {
+  AsyncCallbackJsonWebHandler* playHandler = new AsyncCallbackJsonWebHandler("/api/play", [](AsyncWebServerRequest* request, JsonVariant& json) {
     JsonObject jsonObj = json.as<JsonObject>();
-    if(jsonObj.containsKey("index")) {
+    if (jsonObj.containsKey("index")) {
       int idx = jsonObj["index"].as<int>();
-      if(idx >= 0 && idx < playlist.size()) {
+      if (idx >= 0 && idx < playlist.size()) {
         currentAnimIndex = idx;
         preferences.putInt("animIndex", currentAnimIndex);
-        
+
         active_animation = animationManager.getAnimationByName(playlist[currentAnimIndex]);
-        if(active_animation != nullptr) {
+        if (active_animation != nullptr) {
           active_animation->RestartAnimation();
         }
+        forceMqttPublish = true;
         request->send(200, "text/plain", "OK");
       } else {
         request->send(400, "text/plain", "Index Fehler");
@@ -648,12 +658,14 @@ void setup() {
 void loop() {
   static unsigned long lastWiFiCheck = 0;
   if (WiFi.status() == WL_CONNECTED) {
-    ArduinoOTA.handle(); 
+    ArduinoOTA.handle();
+    UpdateMqtt();
   } else {
     if (millis() - lastWiFiCheck >= 10000) {
-      WiFi.disconnect(); 
+      WiFi.disconnect();
       WiFi.reconnect();
       lastWiFiCheck = millis();
+      forceMqttPublish = true;
     }
   }
 
@@ -663,57 +675,56 @@ void loop() {
   if (currentlyTouching && !isTouched && (millis() - lastReleaseTime >= TOUCH_COOLDOWN)) {
     isTouched = true;
     touchStartTime = millis();
-    longPressHandled = false; 
-  } 
-  else if (currentlyTouching && isTouched) {
+    longPressHandled = false;
+  } else if (currentlyTouching && isTouched) {
     if (!longPressHandled && (millis() - touchStartTime >= LONG_PRESS_TIME)) {
-      
+      forceMqttPublish = true;
       if (currentAnimIndex == 0) {
         clockEnabled = !clockEnabled;
         clockOverlay.setEnabled(clockEnabled);
-        if(!clockEnabled)active_animation->RestartAnimation();
+        if (!clockEnabled) active_animation->RestartAnimation();
         preferences.putBool("clockEnabled", clockEnabled);
       } else {
         // Lampe ist AN -> Wir schalten die Lampe AUS (Index 0)
         currentAnimIndex = 0;
-        preferences.putInt("animIndex", currentAnimIndex); 
-        active_animation = animationManager.getAnimationByName(playlist[0]); 
+        preferences.putInt("animIndex", currentAnimIndex);
+        active_animation = animationManager.getAnimationByName(playlist[0]);
         if (active_animation != nullptr) {
           active_animation->RestartAnimation();
         }
       }
-      longPressHandled = true; 
+      longPressHandled = true;
     }
-  } 
-  else if (!currentlyTouching && isTouched) {
+  } else if (!currentlyTouching && isTouched) {
     isTouched = false;
-    lastReleaseTime = millis(); 
-    
+    lastReleaseTime = millis();
+
     if (!longPressHandled) {
       currentAnimIndex++;
       if (currentAnimIndex >= playlist.size()) {
         currentAnimIndex = 0;
       }
-      
-      preferences.putInt("animIndex", currentAnimIndex); 
-      
+
+      preferences.putInt("animIndex", currentAnimIndex);
+
       active_animation = animationManager.getAnimationByName(playlist[currentAnimIndex]);
       if (active_animation != nullptr) {
-          active_animation->RestartAnimation();
+        active_animation->RestartAnimation();
       }
+      forceMqttPublish = true;
     }
   }
 
   if (millis() - lastUpdate >= UPDATE_INTERVAL) {
-    lastUpdate = millis(); 
-    
+    lastUpdate = millis();
+
     bool flushRGB = false;
-    
+
     // 1. Normale Animation berechnen
     if (active_animation != nullptr) {
       flushRGB = active_animation->Update(cycle_counter);
     }
-    
+
     // 2. Uhr-Overlay drüberstempeln (falls aktiviert)
     if (clockOverlay.isEnabled()) {
       struct tm timeinfo;
@@ -722,7 +733,7 @@ void loop() {
         // Sekundentakt berechnen: Die ersten 1000ms der Sekunde leuchten, danach aus
         bool blinkTick = (millis() % 2000) < 1000;
         clockOverlay.UpdateAndDraw(timeinfo.tm_hour, timeinfo.tm_min, blinkTick);
-        flushRGB = true; // Wir haben etwas auf die LEDs geschrieben, also sicherstellen, dass show() aufgerufen wird
+        flushRGB = true;  // Wir haben etwas auf die LEDs geschrieben, also sicherstellen, dass show() aufgerufen wird
       }
     }
 
@@ -730,7 +741,123 @@ void loop() {
     if (flushRGB) {
       FastLED.show();
     }
-    
+
     cycle_counter++;
   }
+}
+
+// ===== MQTT Callback (Empfangen) =====
+void mqttCallback(int messageSize) {
+  String topic = mqttClient.messageTopic();
+  String payload = "";
+  while (mqttClient.available()) {
+    payload += (char)mqttClient.read();
+  }
+
+  payload.trim();
+  topic.trim();
+
+  Serial.print("Received message on topic: ");
+  Serial.println(topic);
+  Serial.print("Payload: ");
+  Serial.println(payload);
+
+  if (topic == "linus/haydn17/kellerzimmer/bettlicht/command")
+  {
+    // Check if the requested animation exists in the AnimationManager
+    IAnimation* requestedAnim = animationManager.getAnimationByName(payload);
+    
+    if (requestedAnim != nullptr)
+    {
+      // Set and start the new animation
+      active_animation = requestedAnim;
+      active_animation->RestartAnimation();
+      
+      // Find the matching index in the playlist to keep the Web-UI in sync
+      for (size_t i = 0; i < playlist.size(); i++)
+      {
+        if (playlist[i] == payload)
+        {
+          currentAnimIndex = i;
+          preferences.putInt("animIndex", currentAnimIndex);
+          break;
+        }
+      }
+    }
+    else
+    {
+      Serial.println("MQTT Error: Animation not found -> " + payload);
+    }
+    forceMqttPublish = true;
+  }
+  else if (topic == "linus/haydn17/kellerzimmer/bettlicht/clock_command")
+  {
+    if (payload == "ON")
+    {
+      clockEnabled = true;
+      clockOverlay.setEnabled(clockEnabled);
+      if (!clockOverlay.isEnabled()) active_animation->RestartAnimation();
+      preferences.putBool("clockEnabled", clockEnabled);
+    }
+    else if (payload == "OFF")
+    {
+      clockEnabled = false;
+      clockOverlay.setEnabled(clockEnabled);
+      if (!clockOverlay.isEnabled()) active_animation->RestartAnimation();
+      preferences.putBool("clockEnabled", clockEnabled);
+    }
+    forceMqttPublish = true;
+  }
+}
+
+void PublishData()
+{
+  if (active_animation != nullptr) {
+      mqttClient.beginMessage("linus/haydn17/kellerzimmer/bettlicht/status", true, 1);  // topic, retained, qos
+      mqttClient.print(active_animation->GetName());
+      mqttClient.endMessage();
+
+      mqttClient.beginMessage("linus/haydn17/kellerzimmer/bettlicht/status_dig", true, 1);  // topic, retained, qos
+      mqttClient.print(active_animation->GetName() == "OFF" ? "0" : "1");
+      mqttClient.endMessage();
+
+      mqttClient.beginMessage("linus/haydn17/kellerzimmer/bettlicht/status_clock", true, 1);  // topic, retained, qos
+      mqttClient.print(clockEnabled ? "1" : "0");
+      mqttClient.endMessage();
+    }
+    // Dont need else because if animation is nullptr than something is fucked up
+}
+
+void UpdateMqtt() {
+  if (!mqttClient.connected()) {
+    Serial.println("MQTT Connection lost. Reconnect.");
+    ConnectMqtt();
+  }
+  mqttClient.poll();
+  if (millis() - lastMqttPublish >= MqttPublishCycle || forceMqttPublish) {
+    lastMqttPublish = millis();
+    forceMqttPublish = false;
+    PublishData();
+  }
+}
+
+void ConnectMqtt() {
+  mqttClient.onMessage(mqttCallback);
+  mqttClient.setUsernamePassword(mqtt_user, mqtt_pass);
+
+  String clientId = "Bettlicht-ESP-" + String(random(0xffff), HEX);
+  mqttClient.setId(clientId);
+
+  Serial.print("Connecting to MQTT broker '");
+  Serial.print(mqtt_server);
+  Serial.print("'...");
+  while (!mqttClient.connect(mqtt_server, mqtt_port)) {
+    Serial.print(".");
+    delay(700);
+  }
+  Serial.println("\nMQTT connected!");
+
+  mqttClient.subscribe("linus/haydn17/kellerzimmer/bettlicht/command", 2);
+  mqttClient.subscribe("linus/haydn17/kellerzimmer/bettlicht/clock_command", 2);
+  forceMqttPublish = true;
 }
