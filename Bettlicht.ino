@@ -1,3 +1,12 @@
+#include <AppInsights.h>
+#include <RMaker.h>
+#include <RMakerDevice.h>
+#include <RMakerNode.h>
+#include <RMakerParam.h>
+#include <RMakerQR.h>
+#include <RMakerType.h>
+#include <RMakerUtils.h>
+
 #include <WiFi.h>
 #include <ArduinoOTA.h>
 #include "secrets.h"
@@ -813,15 +822,15 @@ void mqttCallback(int messageSize) {
 void PublishData()
 {
   if (active_animation != nullptr) {
-      mqttClient.beginMessage("linus/haydn17/kellerzimmer/bettlicht/status", true, 1);  // topic, retained, qos
+      mqttClient.beginMessage("linus/haydn17/kellerzimmer/bettlicht/status", true, 0);  // topic, retained, qos
       mqttClient.print(active_animation->GetName());
       mqttClient.endMessage();
 
-      mqttClient.beginMessage("linus/haydn17/kellerzimmer/bettlicht/status_dig", true, 1);  // topic, retained, qos
+      mqttClient.beginMessage("linus/haydn17/kellerzimmer/bettlicht/status_dig", true, 0);  // topic, retained, qos
       mqttClient.print(active_animation->GetName() == "OFF" ? "0" : "1");
       mqttClient.endMessage();
 
-      mqttClient.beginMessage("linus/haydn17/kellerzimmer/bettlicht/status_clock", true, 1);  // topic, retained, qos
+      mqttClient.beginMessage("linus/haydn17/kellerzimmer/bettlicht/status_clock", true, 0);  // topic, retained, qos
       mqttClient.print(clockEnabled ? "1" : "0");
       mqttClient.endMessage();
     }
@@ -830,20 +839,22 @@ void PublishData()
 
 void UpdateMqtt() {
   if (!mqttClient.connected()) {
-    Serial.println("MQTT Connection lost. Reconnect.");
-    ConnectMqtt();
-  }
-  mqttClient.poll();
-  if (millis() - lastMqttPublish >= MqttPublishCycle || forceMqttPublish) {
-    lastMqttPublish = millis();
-    forceMqttPublish = false;
-    PublishData();
+    if (millis() - lastMqttReconnectAttempt >= 5000) {
+      lastMqttReconnectAttempt = millis();
+      ConnectMqtt();
+    }
+  } else {
+    mqttClient.poll();
+    if (millis() - lastMqttPublish >= MqttPublishCycle || forceMqttPublish) {
+      lastMqttPublish = millis();
+      forceMqttPublish = false;
+      PublishData();
+    }
   }
 }
 
 void ConnectMqtt() {
   mqttClient.onMessage(mqttCallback);
-  mqttClient.setUsernamePassword(mqtt_user, mqtt_pass);
 
   String clientId = "Bettlicht-ESP-" + String(random(0xffff), HEX);
   mqttClient.setId(clientId);
