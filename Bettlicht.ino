@@ -1,12 +1,3 @@
-#include <AppInsights.h>
-#include <RMaker.h>
-#include <RMakerDevice.h>
-#include <RMakerNode.h>
-#include <RMakerParam.h>
-#include <RMakerQR.h>
-#include <RMakerType.h>
-#include <RMakerUtils.h>
-
 #include <WiFi.h>
 #include <ArduinoOTA.h>
 #include "secrets.h"
@@ -18,7 +9,7 @@
 #include <time.h>
 #include <MqttClient.h>
 
-// --- WEB-BIBLIOTHEKEN ---
+// --- WEB-LIBRARIES ---
 #include <ESPAsyncWebServer.h>
 #include <AsyncJson.h>
 #include <ArduinoJson.h>
@@ -42,7 +33,7 @@ unsigned long lastMqttReconnectAttempt = 0;
 
 CRGB leds[RGB_COUNT];
 
-// ===== Dynamische Variablen =====
+// ===== Dynamic Variables =====
 int touchThreshold = 28000;
 std::vector<String> playlist;
 int currentAnimIndex = 0;
@@ -51,7 +42,7 @@ Preferences preferences;
 AnimationManager animationManager(leds, RGB_COUNT, preferences);
 IAnimation* active_animation = nullptr;
 
-// NEU: BCD Uhr Overlay
+// BCD Clock Overlay
 BCDClockOverlay clockOverlay(leds, RGB_COUNT);
 bool clockEnabled = false;
 
@@ -73,9 +64,9 @@ bool forceMqttPublish = false;
 // ===== Webserver =====
 AsyncWebServer server(80);
 
-// ===== Hilfsfunktionen für die Playlist =====
+// ===== Playlist Helper Functions =====
 void loadPlaylist() {
-  String saved = preferences.getString("playlist", "OFF,WARM_1,WARM_2,NIGHT_BLUE,RAINBOW,FEUER");
+  String saved = preferences.getString("playlist", "OFF,WARM_1,WARM_2,NIGHT_BLUE,RAINBOW,FEUER,SUNRISE_STD");
   playlist.clear();
   int start = 0;
   int end = saved.indexOf(',');
@@ -96,7 +87,7 @@ void savePlaylist() {
   preferences.putString("playlist", saveStr);
 }
 
-// ===== Das Web-Frontend (HTML/JS) =====
+// ===== Web Frontend (HTML/JS) =====
 const char index_html[] PROGMEM = R"rawliteral(
 <!DOCTYPE html>
 <html>
@@ -178,6 +169,7 @@ const char index_html[] PROGMEM = R"rawliteral(
         <option value="2">Blink</option>
         <option value="3">Palette (Verlauf)</option>
         <option value="4">2D Feuer</option>
+        <option value="5">Sonnenaufgang</option>
       </select>
 
       <div id="fieldsStatic" class="form-group">
@@ -213,6 +205,21 @@ const char index_html[] PROGMEM = R"rawliteral(
           <option value="2">Ozean (Blaues Feuer)</option>
           <option value="0">Regenbogen-Feuer</option>
         </select>
+      </div>
+      <div id="fieldsSunrise" class="form-group">
+        <label>Dauer in Sekunden (1-255)</label>
+        <input type="number" id="sunriseDuration" min="1" max="255" value="120">
+        
+        <label>Sonnenaufgangs-Modell</label>
+        <select id="sunriseModel">
+          <option value="0">Modell A: Klarer Horizont (Kräftig)</option>
+          <option value="1">Modell B: Bergnebel (Pastell)</option>
+          <option value="2">Modell C: Arktisch (Lange Blauphase)</option>
+        </select>
+
+        <label>Atmosphärisches Wolkenschimmern (0-255)</label>
+        <input type="range" id="sunriseShimmer" min="0" max="255" value="50" oninput="document.getElementById('shimmerVal').innerText = this.value">
+        <div style="text-align:right; margin-top:-10px; margin-bottom:10px;"><small id="shimmerVal">50</small></div>
       </div>
 
       <div style="display: flex; justify-content: flex-end; gap: 10px; margin-top: 20px;">
@@ -338,7 +345,7 @@ const char index_html[] PROGMEM = R"rawliteral(
     function renderAnimations() {
       let html = "";
       globalAnimations.forEach(anim => {
-        let typeName = anim.type === 1 ? "Static" : anim.type === 2 ? "Blink" : anim.type === 3 ? "Palette" : "2D Feuer";
+        let typeName = anim.type === 1 ? "Static" : anim.type === 2 ? "Blink" : anim.type === 3 ? "Palette" : anim.type === 4 ? "2D Feuer" : "Sonnenaufgang";
         html += `<div class="list-item">
                    <span><strong>${anim.name}</strong> <small>(${typeName})</small></span>
                    <div class="controls">
@@ -364,6 +371,7 @@ const char index_html[] PROGMEM = R"rawliteral(
       document.getElementById('fieldsBlink').style.display = (type == 2) ? 'block' : 'none';
       document.getElementById('fieldsPalette').style.display = (type == 3) ? 'block' : 'none';
       document.getElementById('fieldsFire').style.display = (type == 4) ? 'block' : 'none';
+      document.getElementById('fieldsSunrise').style.display = (type == 5) ? 'block' : 'none';
     }
 
     function openEditor(anim) {
@@ -391,6 +399,11 @@ const char index_html[] PROGMEM = R"rawliteral(
             document.getElementById('fireSparks').value = anim.data[2]; 
             document.getElementById('sparkVal').innerText = anim.data[2]; 
             document.getElementById('firePaletteId').value = anim.data[3]; 
+        } else if(anim.type == 5) {
+            document.getElementById('sunriseDuration').value = anim.data[1];
+            document.getElementById('sunriseModel').value = anim.data[2];
+            document.getElementById('sunriseShimmer').value = anim.data[3];
+            document.getElementById('shimmerVal').innerText = anim.data[3];
         }
       } else {
         document.getElementById('editorTitle').innerText = "Neue Animation erstellen";
@@ -424,6 +437,10 @@ const char index_html[] PROGMEM = R"rawliteral(
           dataBytes[1] = parseInt(document.getElementById('fireCooling').value); 
           dataBytes[2] = parseInt(document.getElementById('fireSparks').value); 
           dataBytes[3] = parseInt(document.getElementById('firePaletteId').value); 
+      } else if(type === 5) {
+          dataBytes[1] = parseInt(document.getElementById('sunriseDuration').value);
+          dataBytes[2] = parseInt(document.getElementById('sunriseModel').value);
+          dataBytes[3] = parseInt(document.getElementById('sunriseShimmer').value);
       }
 
       let payload = { id: parseInt(document.getElementById('animId').value), name: document.getElementById('animName').value, type: type, data: dataBytes };
@@ -447,18 +464,19 @@ void setup() {
   WiFi.setAutoReconnect(true);
   WiFi.begin(ssid, password);
 
-  // NEU: Zeitserver einrichten (Deutsche Zeit: CET/CEST)
   configTzTime("CET-1CEST,M3.5.0,M10.5.0/3", "pool.ntp.org", "time.nist.gov");
 
   ArduinoOTA.setHostname("Bettlampe");
   ArduinoOTA.setPassword(ota_pass);
   ArduinoOTA.begin();
 
+  // ===== Setup out of Memory =====
+
   preferences.begin("lampe", false);
 
   touchThreshold = preferences.getInt("threshold", 28000);
 
-  // Uhr-Status laden
+  // Load clock state
   clockEnabled = preferences.getBool("clockEnabled", false);
   clockOverlay.setEnabled(clockEnabled);
 
@@ -469,7 +487,7 @@ void setup() {
 
   animationManager.begin();
 
-  // Standard-Animationen erstellen
+  // Create default animations
   if (animationManager.getAnimationIndex("OFF") == -1) {
     AnimationSetting* newSettings = animationManager.createSettingsStaticColor(0, 0, "OFF");
     animationManager.createAnimation(newSettings);
@@ -495,14 +513,18 @@ void setup() {
     animationManager.createAnimation(newSettings);
     delete newSettings;
   }
-  // NEU: Das Feuer standardmäßig anlegen, falls noch nicht da
   if (animationManager.getAnimationIndex("FEUER") == -1) {
     AnimationSetting* newSettings = animationManager.createSettingsFire2D(45, 110, 4, 255, "FEUER");
     animationManager.createAnimation(newSettings);
     delete newSettings;
   }
+  if (animationManager.getAnimationIndex("SUNRISE_STD") == -1) {
+    AnimationSetting* newSettings = animationManager.createSettingsSunrise(120, 0, 30, 255, "SUNRISE_STD");
+    animationManager.createAnimation(newSettings);
+    delete newSettings;
+  }
 
-  // Aktuellen Index laden
+  // Load current index
   currentAnimIndex = preferences.getInt("animIndex", 0);
   if (currentAnimIndex >= playlist.size() || currentAnimIndex < 0) {
     currentAnimIndex = 0;
@@ -513,7 +535,7 @@ void setup() {
     active_animation->RestartAnimation();
   }
 
-  // ===== WEBSERVER ROUTEN =====
+  // ===== Webserver =====
 
   server.on("/", HTTP_GET, [](AsyncWebServerRequest* request) {
     request->send_P(200, "text/html", index_html);
@@ -524,7 +546,7 @@ void setup() {
     doc["threshold"] = touchThreshold;
     doc["currentAnim"] = playlist[currentAnimIndex];
     doc["currentIndex"] = currentAnimIndex;
-    doc["clockEnabled"] = clockEnabled;  // NEU: Uhr-Status mitsenden
+    doc["clockEnabled"] = clockEnabled;  // Send clock state
     String response;
     serializeJson(doc, response);
     request->send(200, "application/json", response);
@@ -542,7 +564,6 @@ void setup() {
   });
   server.addHandler(threshHandler);
 
-  // NEU: Route für den Uhr-Schalter
   AsyncCallbackJsonWebHandler* clockHandler = new AsyncCallbackJsonWebHandler("/api/clock", [](AsyncWebServerRequest* request, JsonVariant& json) {
     JsonObject jsonObj = json.as<JsonObject>();
     if (jsonObj.containsKey("enabled")) {
@@ -694,7 +715,7 @@ void loop() {
         if (!clockEnabled) active_animation->RestartAnimation();
         preferences.putBool("clockEnabled", clockEnabled);
       } else {
-        // Lampe ist AN -> Wir schalten die Lampe AUS (Index 0)
+        // Lamp is ON -> Switch OFF (Index 0)
         currentAnimIndex = 0;
         preferences.putInt("animIndex", currentAnimIndex);
         active_animation = animationManager.getAnimationByName(playlist[0]);
@@ -729,24 +750,19 @@ void loop() {
 
     bool flushRGB = false;
 
-    // 1. Normale Animation berechnen
     if (active_animation != nullptr) {
       flushRGB = active_animation->Update(cycle_counter);
     }
 
-    // 2. Uhr-Overlay drüberstempeln (falls aktiviert)
     if (clockOverlay.isEnabled()) {
       struct tm timeinfo;
-      // Holt die Zeit asynchron, blockiert nicht (Timeout 0)
       if (getLocalTime(&timeinfo, 0)) {
-        // Sekundentakt berechnen: Die ersten 1000ms der Sekunde leuchten, danach aus
         bool blinkTick = (millis() % 2000) < 1000;
         clockOverlay.UpdateAndDraw(timeinfo.tm_hour, timeinfo.tm_min, blinkTick);
-        flushRGB = true;  // Wir haben etwas auf die LEDs geschrieben, also sicherstellen, dass show() aufgerufen wird
+        flushRGB = true;
       }
     }
 
-    // 3. Wenn sich etwas geändert hat -> Update an Streifen senden
     if (flushRGB) {
       FastLED.show();
     }
@@ -755,7 +771,6 @@ void loop() {
   }
 }
 
-// ===== MQTT Callback (Empfangen) =====
 void mqttCallback(int messageSize) {
   String topic = mqttClient.messageTopic();
   String payload = "";
@@ -834,7 +849,6 @@ void PublishData()
       mqttClient.print(clockEnabled ? "1" : "0");
       mqttClient.endMessage();
     }
-    // Dont need else because if animation is nullptr than something is fucked up
 }
 
 void UpdateMqtt() {
@@ -849,7 +863,6 @@ void UpdateMqtt() {
       lastMqttPublish = millis();
       forceMqttPublish = false;
       PublishData();
-    }
   }
 }
 
@@ -859,12 +872,18 @@ void ConnectMqtt() {
   String clientId = "Bettlicht-ESP-" + String(random(0xffff), HEX);
   mqttClient.setId(clientId);
 
+  // Set username and password for MQTT authentication
+  mqttClient.setUsernamePassword(mqtt_user, mqtt_pass);
+
   Serial.print("Connecting to MQTT broker '");
   Serial.print(mqtt_server);
   Serial.print("'...");
-  while (!mqttClient.connect(mqtt_server, mqtt_port)) {
-    Serial.print(".");
-    delay(700);
+  
+  // Do not block with a while loop. Check connection and print error if failed.
+  if (!mqttClient.connect(mqtt_server, mqtt_port)) {
+    Serial.print(" Failed! Error code = ");
+    Serial.println(mqttClient.connectError());
+    return; // Don't block the main loop, UpdateMqtt() will retry in 5 seconds
   }
   Serial.println("\nMQTT connected!");
 

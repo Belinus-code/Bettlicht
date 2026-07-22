@@ -5,28 +5,60 @@
 #define BLINK 2
 #define PALETTE 3
 #define FIRE_2D 4
+#define SUNRISE 5
 
 // ==========================================
 // EIGENE FARBPALETTEN FÜR REALISTISCHERES FEUER
 // ==========================================
-// Das Standard HeatColors_p von FastLED wird sehr schnell weiß.
-// Diese Palette hat ein viel breiteres Band für sattes Orange und Gelb.
 DEFINE_GRADIENT_PALETTE( BetterFire_gp ) {
-  0,     0,   0,   0,   // Schwarz (Hintergrund)
-  50,  255,   0,   0,   // Rot
-  120, 255, 100,   0,   // Sattes Orange
-  190, 255, 200,   0,   // Leuchtendes Gelb
-  255, 255, 255, 150    // Gelb-Weiß (nur an den allerheißesten Funken)
+  0,     0,   0,   0,   
+  50,  255,   0,   0,   
+  120, 255, 100,   0,   
+  190, 255, 200,   0,   
+  255, 255, 255, 150    
 };
 
-// Das Standard LavaColors_p von FastLED ist fast nur Rot und Schwarz.
-// Diese Palette fügt Orange und Gelb für die "heißen Risse" in der Lava hinzu.
 DEFINE_GRADIENT_PALETTE( BetterLava_gp ) {
-  0,     0,   0,   0,   // Schwarz (Lavakruste)
-  80,  150,   0,   0,   // Dunkelrot (abgekühlt)
-  150, 220,   0,   0,   // Rot
-  200, 255,  80,   0,   // Orange-Rot
-  255, 255, 180,   0    // Gelblich-Orange (heißeste Risse)
+  0,     0,   0,   0,   
+  80,  150,   0,   0,   
+  150, 220,   0,   0,   
+  200, 255,  80,   0,   
+  255, 255, 180,   0    
+};
+
+// ==========================================
+// SONNENAUFGANGS PALETTEN (Laut Research Report Kapitel 6)
+// ==========================================
+
+// Modell A: Klarer Horizont (Harte, kräftige Farben)
+DEFINE_GRADIENT_PALETTE( Sunrise_Clear_gp ) {
+    0,   0,   0,   0,    // Nacht (Schwarz)
+   45,   5,   5,  20,    // Astronomisch (Tiefblau)
+   90,  20,   0,  51,    // Nautisch (Dunkelviolett)
+  140, 102,   0,   0,    // Bürgerlich Start (Tiefrot)
+  180, 255,  36,   0,    // Sonnenrand (Leuchtend Rot)
+  220, 255, 140,   0,    // Goldene Stunde (Orange)
+  255, 255, 255, 255     // Tageslicht (Weiß)
+};
+
+// Modell B: Bergnebel (Mie-Streuung, Pastell, diffus)
+DEFINE_GRADIENT_PALETTE( Sunrise_Fog_gp ) {
+    0,   2,   2,   5,    // Nacht im Nebel
+   60,  18,  21,  38,    // Blaue Stunde (diffus)
+  115,  59,  34,  76,    // Dunst-Färbung (Lila)
+  170, 179,  89,  76,    // Gedämpftes Licht (Altrosa)
+  210, 217, 155, 148,    // Aufhellung (Pastell-Rosa/Orange)
+  255, 230, 230, 250     // Nebelblendung (Kaltweißes Streulicht)
+};
+
+// Modell C: Arktisch (Extrem lange blaue Phase)
+DEFINE_GRADIENT_PALETTE( Sunrise_Arctic_gp ) {
+    0,   0,   0,   0,
+   80,   0,  10,  30,    // Langsame blaue Aufhellung
+  150,   0,  40,  80,    // Ausgedehnte nautische Dämmerung
+  200,  30,   0,  50,    // Spätes Violett
+  230, 150,  30,   0,    // Später, kurzer Rot-Durchbruch
+  255, 255, 200, 100     // Flaches, warmes Endlicht
 };
 
 typedef struct{
@@ -41,7 +73,7 @@ class IAnimation
     public:
         virtual void ResetSettings() = 0;
         virtual void RestartAnimation() = 0;
-        virtual bool Update(unsigned long tick) = 0; //return true if LEDs needs to be flushed. 
+        virtual bool Update(unsigned long tick) = 0; 
         virtual String GetAvailableSettings()
         {
             return "No Settings Available";
@@ -360,8 +392,8 @@ public:
             case 1: currentPalette = PartyColors_p; break;
             case 2: currentPalette = OceanColors_p; break;     
             case 3: currentPalette = ForestColors_p; break;    
-            case 4: currentPalette = BetterFire_gp; break;  // Eigene Feuer-Palette
-            case 5: currentPalette = BetterLava_gp; break;  // Eigene Lava-Palette
+            case 4: currentPalette = BetterFire_gp; break;
+            case 5: currentPalette = BetterLava_gp; break;
             case 6: 
                 currentPalette = CRGBPalette16(CRGB::Black, CRGB::Green, CRGB::Black, CRGB::DarkGreen);
                 break;
@@ -465,17 +497,6 @@ private:
     bool update_needed = false;
 };
 
-// ==========================================
-// Horizontale 2D Feuersimulation
-// ==========================================
-struct FireSpark {
-    bool active;            
-    float position;         
-    float velocity;         
-    uint8_t intensity;      
-    uint8_t cooling_rate;   
-};
-
 class HorizontalFireAnimation : public IAnimation {
 public:
     HorizontalFireAnimation(struct CRGB *targetArray, int RGBCount)
@@ -502,7 +523,7 @@ public:
             sparks[i].active = false;
         }
 
-        ChangePalette(4); // Default: Eigene Feuerpalette
+        ChangePalette(4); 
     }
 
     virtual ~HorizontalFireAnimation() {
@@ -528,7 +549,6 @@ public:
     }
 
     bool Update(unsigned long tick) override {
-        // --- 1. Thermodynamik Update ---
         for (uint16_t i = 0; i < rgb_count; i++) {
             uint8_t random_cooling = random8(0, ((cooling_base * 10) / rgb_count) + 2);
             heat[i] = qsub8(heat[i], random_cooling);
@@ -538,8 +558,6 @@ public:
         injectEmbers();
         updateSparks();
 
-        // --- 2. Render to LEDs ---
-        // Die Helligkeit bleibt nun konstant, um ein hektisches Stroboskop-Flackern zu vermeiden
         if(FastLED.getBrightness() != brightness) {
             FastLED.setBrightness(brightness);
         }
@@ -575,8 +593,8 @@ public:
             case 1: firePalette = PartyColors_p; break;
             case 2: firePalette = OceanColors_p; break;     
             case 3: firePalette = ForestColors_p; break;    
-            case 4: firePalette = BetterFire_gp; break;     // <-- Nutzen der neuen Feuerpalette
-            case 5: firePalette = BetterLava_gp; break;     // <-- Nutzen der neuen Lavapalette
+            case 4: firePalette = BetterFire_gp; break;     
+            case 5: firePalette = BetterLava_gp; break;     
             case 6: firePalette = CRGBPalette16(CRGB::Black, CRGB::Green, CRGB::Black, CRGB::DarkGreen); break;
             default: firePalette = BetterFire_gp; break;
         }
@@ -642,6 +660,14 @@ private:
     uint16_t *ember_positions;
     uint8_t num_embers;
 
+    struct FireSpark {
+        bool active;            
+        float position;         
+        float velocity;         
+        uint8_t intensity;      
+        uint8_t cooling_rate;   
+    };
+
     static const uint8_t MAX_SPARKS = 20;
     FireSpark sparks[MAX_SPARKS];
 
@@ -656,18 +682,16 @@ private:
     }
 
     void injectEmbers() {
-        bool wind_gust = random8() < 20; // Seltenere "Windstöße", damit es ruhiger wirkt
+        bool wind_gust = random8() < 20; 
         
         for (uint8_t i = 0; i < num_embers; i++) {
             uint16_t pos = ember_positions[i];
-            
             uint8_t heat_added = random8(70, 180);
             
-            // Verstärktes lokales Flackern je nach Wind
             if (wind_gust) {
-                heat_added = random8(150, 220); // Sanfteres Auflodern
+                heat_added = random8(150, 220); 
             } else if (random8() < 30) {
-                heat_added = random8(30, 70);   // Glut sackt nicht mehr ganz so extrem ab
+                heat_added = random8(30, 70);   
             }
             
             heat[pos] = qadd8(heat[pos], heat_added);
@@ -712,6 +736,151 @@ private:
 };
 
 // ==========================================
+// NEU: Sonnenaufgangs Animation (Basierend auf Research Report)
+// ==========================================
+class SunriseAnimation : public IAnimation {
+public:
+    SunriseAnimation(struct CRGB *targetArray, int RGBCount) {
+        leds = targetArray;
+        rgb_count = RGBCount;
+        ChangePalette(0); // Start mit Modell A (Klarer Horizont)
+    }
+
+    void ResetSettings() override {
+        brightness = 255;
+        duration_sec = 120; // 2 Minuten Default
+        paletteID = 0;
+        shimmer_intensity = 30; // Leichtes Wolkenflackern
+        ChangePalette(paletteID);
+    }
+
+    void RestartAnimation() override {
+        FastLED.setBrightness(brightness);
+        start_millis = millis();
+        animation_finished = false;
+    }
+
+    bool Update(unsigned long tick) override {
+        // Nutze Echtzeit (millis) anstelle von Tick-Zählern, um Drift zu vermeiden
+        // Siehe Research Report Kapitel 7.3
+        unsigned long currentMillis = millis();
+        unsigned long durationMs = duration_sec * 1000UL;
+        unsigned long elapsedTime = currentMillis - start_millis;
+
+        uint8_t colorIndex = 255; // Default: Ende der Animation (Hell)
+
+        if (elapsedTime < durationMs) {
+            // Dynamische Projektion auf 0-255 Palettenindex
+            colorIndex = (elapsedTime * 255) / durationMs;
+        } else {
+            animation_finished = true;
+        }
+
+        // Stelle sicher, dass die globale Helligkeit stimmt (ohne Blockade)
+        if(FastLED.getBrightness() != brightness) {
+            FastLED.setBrightness(brightness);
+        }
+
+        // Render Frame mit oder ohne Shimmer-Effekt (Research Report Kapitel 8.2)
+        if (shimmer_intensity == 0 || animation_finished) {
+            // Einfaches Auffüllen, wenn kein Shimmer gewollt oder Animation zu Ende (Stabilität)
+            fill_solid(leds, rgb_count, ColorFromPalette(sunrisePalette, colorIndex, 255, LINEARBLEND));
+        } else {
+            // Stochastisches Wolkenschimmern berechnen
+            for(int i = 0; i < rgb_count; i++) {
+                // Perlin Noise: Langsame zeitliche (millis/4) und räumliche (i*30) Veränderung
+                uint8_t noise = inoise8(currentMillis / 4, i * 30);
+                
+                // Je nach shimmer_intensity wird der Noise-Faktor skaliert.
+                // Ein hoher Shimmer sorgt für tiefe Helligkeits-Einbrüche (Schatten)
+                uint8_t dim_factor = scale8(255 - noise, shimmer_intensity);
+                
+                // Pixelhelligkeit ist 255 abzüglich dem Dim-Faktor
+                uint8_t pixelBrightness = qsub8(255, dim_factor);
+                
+                // Nutze LINEARBLEND für CIELAB-ähnliche smoothe Übergänge aus der FastLED Palette
+                leds[i] = ColorFromPalette(sunrisePalette, colorIndex, pixelBrightness, LINEARBLEND);
+            }
+        }
+
+        return true; 
+    }
+
+    void ChangePalette(uint8_t id) {
+        paletteID = id;
+        switch(id) {
+            case 0: sunrisePalette = Sunrise_Clear_gp; break;
+            case 1: sunrisePalette = Sunrise_Fog_gp; break;
+            case 2: sunrisePalette = Sunrise_Arctic_gp; break;
+            default: sunrisePalette = Sunrise_Clear_gp; break;
+        }
+    }
+
+    int GetSetting(int index) override {
+        switch(index) {
+            case 0: return duration_sec;
+            case 1: return paletteID;
+            case 2: return shimmer_intensity;
+            case 3: return brightness;
+            default: return -1;
+        }
+    }
+
+    String GetAvailableSettings() override { 
+        return "0: Duration (sec)\n1: Palette Model\n2: Shimmer\n3: Brightness"; 
+    }
+    
+    String GetName() override { return name; }
+
+    void getAnimationSetting(AnimationSetting* settings) override {
+        settings->id = id;
+        settings->type = SUNRISE;
+
+        memset(settings->name, 0, sizeof(settings->name));
+        int len = name.length();
+        if (len > 13) len = 13;
+        memcpy(settings->name, name.c_str(), len);
+
+        settings->data[0] = brightness;
+        settings->data[1] = duration_sec; // Max 255 Sekunden (~4.25 Minuten)
+        settings->data[2] = paletteID;
+        settings->data[3] = shimmer_intensity;
+    }
+
+    void applyAnimationSetting(AnimationSetting* settings) override {
+        id = settings->id;
+        char tempName[14] = {0};
+        strncpy(tempName, settings->name, 13);
+        name = String(tempName);
+        
+        brightness = settings->data[0];
+        duration_sec = settings->data[1];
+        ChangePalette(settings->data[2]);
+        shimmer_intensity = settings->data[3];
+        
+        if(duration_sec == 0) duration_sec = 120; // Fallback
+    }
+
+private:
+    uint8_t id = 0;
+    String name = "";
+    CRGB *leds;
+    int rgb_count;
+    
+    CRGBPalette16 sunrisePalette;
+    uint8_t brightness = 255;
+    
+    // Parameter
+    uint8_t duration_sec = 120;
+    uint8_t paletteID = 0;
+    uint8_t shimmer_intensity = 30;
+
+    // Runtime state
+    unsigned long start_millis = 0;
+    bool animation_finished = false;
+};
+
+// ==========================================
 // BCD Clock Overlay
 // ==========================================
 class BCDClockOverlay {
@@ -727,24 +896,14 @@ public:
     
     void setColor(CRGB c) { color = c; }
 
-    // Wird nach der Haupt-Animation und VOR FastLED.show() aufgerufen
     void UpdateAndDraw(uint8_t hours, uint8_t minutes, bool blinkTick) {
         if (!enabled || rgb_count < 14) return;
 
         int start_idx = rgb_count - 14;
 
-        // 1. Hintergrund der letzten 14 LEDs abdunkeln (damit sich die Uhr abhebt)
         for(int i = 0; i < 14; i++) {
-            // Skaliert die Helligkeit der bestehenden Animation auf ca. 15% runter
             leds[start_idx + i].nscale8(40); 
         }
-
-        // BCD Layout (14 LEDs):
-        // [0-1] Stunden Zehner
-        // [2-5] Stunden Einer
-        // [6-8] Minuten Zehner
-        // [9-12] Minuten Einer
-        // [13]   Trenner-Punkt (Blinkend)
 
         drawBits(start_idx, 2, hours / 10);
         drawBits(start_idx + 2, 4, hours % 10);
@@ -761,11 +920,10 @@ private:
     CRGB *leds;
     int rgb_count;
     bool enabled = false;
-    CRGB color = CRGB::White; // Standardfarbe für die aktive Uhr
+    CRGB color = CRGB::White; 
 
     void drawBits(int start_idx, int num_bits, uint8_t value) {
         for (int i = 0; i < num_bits; i++) {
-            // MSB first (Höchstwertiges Bit zuerst, d.h. "links")
             int bit_pos = num_bits - 1 - i;
             if ((value >> bit_pos) & 0x01) {
                 leds[start_idx + i] = color;
@@ -843,6 +1001,10 @@ class AnimationManager
             else if(settings->type == FIRE_2D)
             {
                 animation = new HorizontalFireAnimation(leds, rgb_count);
+            }
+            else if(settings->type == SUNRISE) // NEU: Instanziierung der Sunrise Klasse
+            {
+                animation = new SunriseAnimation(leds, rgb_count);
             }
             else return -3;
             
@@ -970,6 +1132,21 @@ class AnimationManager
             settings->data[1] = cooling_base;
             settings->data[2] = sparking_chance;
             settings->data[3] = paletteID;
+            return settings;
+        }
+
+        // NEU: Factory-Methode für den Sonnenaufgang
+        AnimationSetting* createSettingsSunrise(uint8_t duration_sec, uint8_t paletteID, uint8_t shimmer, uint8_t brightness, String name)
+        {
+            if (name.length() > 13) return nullptr;
+            AnimationSetting* settings = new AnimationSetting();
+            settings->type = SUNRISE;
+            memset(settings->name, 0, sizeof(settings->name));
+            memcpy(settings->name, name.c_str(), name.length());
+            settings->data[0] = brightness;
+            settings->data[1] = duration_sec;
+            settings->data[2] = paletteID;
+            settings->data[3] = shimmer;
             return settings;
         }
 
